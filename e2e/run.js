@@ -180,11 +180,36 @@ function installModelStandIn() {
       return d;
     }
   };
+  const bump = (k) => localStorage.setItem(k, String(Number(get(k, '0')) + 1));
+  function session(history, opts) {
+    return {
+      async clone() {
+        return session(history.slice(), opts);
+      },
+      async append(text) {
+        bump('lm-appends');
+        history.push(text);
+      },
+      promptStreaming(user) {
+        const list = JSON.parse(get('lm-prompts', '[]'));
+        list.push({ system: history[0], context: history[1], user, inputs: opts.expectedInputs, outputs: opts.expectedOutputs, appendsBefore: Number(get('lm-appends', '0')) });
+        localStorage.setItem('lm-prompts', JSON.stringify(list));
+        const file = (/The test file is named (\S+)\./.exec(user) || [])[1] || 'unknown';
+        return (async function* () {
+          yield '```\n// ' + file + ' written by the stand-in model\n';
+          await new Promise((r) => setTimeout(r, 30));
+          yield 'test("works", () => {});\n```';
+        })();
+      },
+      destroy() {},
+    };
+  }
   globalThis.LanguageModel = {
     async availability() {
       return get('lm-status', 'available');
     },
     async create(opts) {
+      bump('lm-creates');
       const status = get('lm-status', 'available');
       if (status === 'unavailable') throw new Error('not supported');
       if (opts.monitor && status !== 'available') {
@@ -197,21 +222,7 @@ function installModelStandIn() {
         }
         localStorage.setItem('lm-status', 'available');
       }
-      const system = (opts.initialPrompts || [])[0];
-      return {
-        promptStreaming(user) {
-          const list = JSON.parse(get('lm-prompts', '[]'));
-          list.push({ system: system && system.content, user, inputs: opts.expectedInputs, outputs: opts.expectedOutputs });
-          localStorage.setItem('lm-prompts', JSON.stringify(list));
-          const file = (/The test file is named (\S+)\./.exec(user) || [])[1] || 'unknown';
-          return (async function* () {
-            yield '```\n// ' + file + ' written by the stand-in model\n';
-            await new Promise((r) => setTimeout(r, 30));
-            yield 'test("works", () => {});\n```';
-          })();
-        },
-        destroy() {},
-      };
+      return session([(opts.initialPrompts || [])[0].content], opts);
     },
   };
 }
@@ -238,12 +249,24 @@ async function unitTests() {
     check('framework and file name are filled in, nothing else is asked', (await page.inputValue('#code-framework')) === 'the standard testing package' && /discount_test\.go/.test(await text(page, '#unit-file')) && (await page.locator('#fallback').isHidden()));
     await page.waitForFunction(() => /Ready\./.test(document.getElementById('engine').textContent));
     check('the built-in model is reported ready', /on this computer/.test(await text(page, '#engine')));
+    await page.waitForFunction(() => Number(localStorage.getItem('lm-appends') || 0) >= 1, null, { timeout: 5000 }).catch(() => {});
+    check('the code is read into the model before the button is pressed', (await page.evaluate(() => Number(localStorage.getItem('lm-appends') || 0))) === 1);
     await page.click('#unit-go');
     await page.waitForFunction(() => !document.getElementById('unit-copy').disabled);
     const out = await text(page, '#unit-out');
     check('streamed answer shown, outer code fence removed', out === '// discount_test.go written by the stand-in model\ntest("works", () => {});\n', out);
     let p = (await prompts(page)).pop();
-    check('the prompt names Go, the framework, the file and the package, with the code fenced as data', /Write unit tests in Go using the standard testing package/.test(p.user) && /package pricing, the same package/.test(p.user) && /-----BEGIN CODE-----\npackage pricing/.test(p.user) && /one complete test file/.test(p.system));
+    check('the instruction names Go, the framework, the file and the package; the code was read beforehand', /Write unit tests in Go using the standard testing package/.test(p.user) && /package pricing, the same package/.test(p.user) && !/func Discount/.test(p.user) && /-----BEGIN CODE-----\npackage pricing/.test(p.context) && /one complete test file/.test(p.system) && p.appendsBefore === 1);
+    check('pressing the button did not read the code again', (await page.evaluate(() => Number(localStorage.getItem('lm-appends')))) === 1);
+    check('the result line reports time, length and time to the first line', /^Done in [\d.]+ s, 2 lines \(first line after [\d.]+ s\)\.$/.test(await text(page, '#engine')), await text(page, '#engine'));
+    await page.click('#unit-go');
+    check('the same request again is answered at once from memory', /earlier tests are shown at once/.test(await text(page, '#engine')) && (await prompts(page)).length === 1);
+    await page.selectOption('#code-depth', 'quick');
+    await page.click('#unit-go');
+    await page.waitForFunction(() => !document.getElementById('unit-copy').disabled && /Done in/.test(document.getElementById('engine').textContent));
+    p = (await prompts(page)).pop();
+    check('"Quick" asks for one normal and one error case per function', /one test of a normal input and one of an error case/.test(p.user));
+    check('the model was loaded once for all of this', (await page.evaluate(() => Number(localStorage.getItem('lm-creates')))) === 1);
     check('the model is asked for English text in and out', JSON.stringify(p.inputs) === '[{"type":"text","languages":["en"]}]' && JSON.stringify(p.outputs) === '[{"type":"text","languages":["en"]}]');
     const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#unit-download')]);
     check('download is named discount_test.go', dl.suggestedFilename() === 'discount_test.go');
@@ -328,7 +351,7 @@ async function unitTests() {
     await page.click('#unit-go');
     await page.waitForFunction(() => document.getElementById('unit-out').textContent.includes('TestDiscount'));
     const last = calls[calls.length - 1];
-    check('fallback provider gets the same prompt, with the key', last && last.url === 'https://llm.example.test/v1/chat/completions' && last.headers.authorization === 'Bearer sk-stand-in' && /Write unit tests in Go/.test(JSON.parse(last.body).messages[1].content));
+    check('fallback provider gets code and instruction in one message, with the key', last && last.url === 'https://llm.example.test/v1/chat/completions' && last.headers.authorization === 'Bearer sk-stand-in' && /-----BEGIN CODE-----[\s\S]*Write unit tests in Go/.test(JSON.parse(last.body).messages[1].content));
     const stored = await page.evaluate(() => chrome.storage.local.get('ai'));
     check('the key is not stored unless asked', stored.ai && stored.ai.key === '');
     await page.screenshot({ path: path.join(OUT, 'unit-fallback.png') });

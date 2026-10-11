@@ -34,6 +34,8 @@ Languages recognised for unit tests, with the framework used by default (you can
 
 Unit tests are written by Gemini Nano through Chrome's Prompt API, which extensions can use from Chrome 138. Chrome downloads the model once (a few GB) the first time; SpecTest shows the progress. Chrome only runs it on computers with Windows 10/11, macOS 13+, Linux or a Chromebook Plus, at least 22 GB of free disk, and either more than 4 GB of GPU memory or 16 GB of RAM. On a computer that cannot run it, SpecTest says why and only then offers to use an AI provider key instead.
 
+**Speed.** The model writes a few dozen words a second on a typical laptop, so the time is mostly the length of the test file it writes: a long, thorough file for a 250-line class can take a minute or more. SpecTest takes everything else off the clock: the model is loaded once per tab, not once per request; the code is read into the model in the background while you look at it, so pressing **Write tests** only sends the short instruction; the same code and settings a second time are answered at once; and **Quick** (one normal and one error case per function) asks for a much shorter file. After each run the page shows the total time and when the first line appeared.
+
 It is a small model. Expect a useful first draft that sometimes calls functions the wrong way or misses an edge case, not finished tests. Copy one function or class at a time: about 12,000 characters of code is the most it is given.
 
 ## Contract tests: what they check
@@ -110,9 +112,9 @@ Only when Chrome says this computer cannot run its model does SpecTest show the 
 ## Develop
 
 ```bash
-npm test                 # 35 unit tests
+npm test                 # 39 unit tests
 npm run verify           # generated tests really run, in every language (needs go, python3 + pytest + requests, javac, curl)
-NODE_PATH=$(npm root -g) npm run e2e   # 57 browser checks; needs Playwright with Chromium
+NODE_PATH=$(npm root -g) npm run e2e   # 63 browser checks; needs Playwright with Chromium
 npm run screenshots      # regenerate the store pictures
 npm run package          # dist/spectest-<version>.zip
 ```

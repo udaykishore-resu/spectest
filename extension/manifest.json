@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "SpecTest — unit tests from copied code, API tests from contracts",
   "short_name": "SpecTest",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Writes tests for code you copy or upload, on your computer with Chrome's built-in AI, and API tests from OpenAPI contracts.",
   "minimum_chrome_version": "111",
   "icons": {

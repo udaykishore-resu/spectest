@@ -61,6 +61,13 @@
               <input type="text" id="code-framework" spellcheck="false" />
             </div>
             <div>
+              <label class="field" for="code-depth">How many tests</label>
+              <select id="code-depth">
+                <option value="thorough">Thorough: every case the code shows</option>
+                <option value="quick">Quick: one normal and one error case each (shorter, faster)</option>
+              </select>
+            </div>
+            <div>
               <label class="field" for="code-notes">Anything else the tests should do</label>
               <input type="text" id="code-notes" placeholder="Optional, for example: use table-driven tests" />
             </div>

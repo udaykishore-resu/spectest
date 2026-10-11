@@ -325,8 +325,45 @@
     updateFileLine();
     refreshEngine().then((status) => {
       if (opts.auto && status === 'available') writeTests();
+      else primeSoon(0);
     });
   }
+
+  /* ------------------------------------------------------------ speed
+     The answer's length is most of the time and only the model controls that. What SpecTest controls:
+     the model is kept loaded for the page, the code is read in while the user is still looking at it,
+     the same request twice is answered from memory, and "Quick" asks for a shorter file. */
+  const engine = OnDevice.createEngine();
+  const answered = new Map(); // prompt -> tests, for this page only
+  let primeTimer = 0;
+
+  function currentPrompt(remote) {
+    const lang = Detect.byId($('code-lang').value);
+    return Ai.buildUnitPrompt({
+      code: $('code-text').value,
+      language: lang.label,
+      framework: $('code-framework').value,
+      fileName: codeFileName(),
+      notes: $('code-notes').value,
+      depth: $('code-depth').value,
+      limit: remote ? Ai.MAX_MATERIAL : Ai.MAX_LOCAL,
+    });
+  }
+
+  /* Read the code into the model in the background, so pressing the button only sends the short instruction. */
+  function primeSoon(delay) {
+    clearTimeout(primeTimer);
+    primeTimer = setTimeout(() => {
+      if (engineStatus !== 'available' || $('use-remote').checked || $('code-setup').hidden || state.abort) return;
+      if (!$('code-text').value.trim()) return;
+      const p = currentPrompt(false);
+      engine.prime(p.system, p.context).catch(() => {
+        /* reported when the user presses the button */
+      });
+    }, delay);
+  }
+
+  const secs = (ms) => (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + ' s';
 
   function updateFileLine() {
     $('unit-file').textContent = 'Saved as ' + codeFileName();
@@ -349,7 +386,7 @@
   function setBusy(busy) {
     $('unit-go').hidden = busy;
     $('unit-stop').hidden = !busy;
-    for (const id of ['code-lang', 'code-framework', 'code-notes', 'code-text']) $(id).disabled = busy;
+    for (const id of ['code-lang', 'code-framework', 'code-notes', 'code-depth', 'code-text']) $(id).disabled = busy;
   }
 
   async function writeTests() {
@@ -357,17 +394,18 @@
     hideAllow('ai-allow');
     const code = $('code-text').value;
     if (!code.trim()) return unitError('There is no code to test.');
-    const lang = Detect.byId($('code-lang').value);
     const remote = $('use-remote').checked;
-    const prompt = Ai.buildUnitPrompt({
-      code,
-      language: lang.label,
-      framework: $('code-framework').value,
-      fileName: codeFileName(),
-      notes: $('code-notes').value,
-      limit: remote ? Ai.MAX_MATERIAL : Ai.MAX_LOCAL,
-    });
+    const prompt = currentPrompt(remote);
+    const key = (remote ? 'remote\n' : 'local\n') + prompt.system + '\n' + prompt.user;
     const out = $('unit-out');
+    if (answered.has(key)) {
+      state.aiText = answered.get(key);
+      out.textContent = state.aiText;
+      $('unit-copy').disabled = false;
+      $('unit-download').disabled = false;
+      $('engine').textContent = 'Same code and settings as before, so the earlier tests are shown at once. Change anything to write new ones.';
+      return;
+    }
     out.textContent = '';
     $('unit-copy').disabled = true;
     $('unit-download').disabled = true;
@@ -376,18 +414,26 @@
     setBusy(true);
     const started = Date.now();
     const progress = $('unit-progress');
-    $('engine').textContent = 'Writing tests\u2026';
+    let downloading = false;
+    const tick = () => {
+      if (!downloading) $('engine').textContent = 'Writing tests\u2026 ' + Math.round((Date.now() - started) / 1000) + ' s';
+    };
+    tick();
+    const ticker = setInterval(tick, 1000);
+    let times = null;
     try {
       let text;
       if (remote) {
         text = await writeRemote(prompt, state.abort.signal);
         if (text === null) return;
       } else {
-        text = await OnDevice.generate({
+        const r = await engine.generate({
           system: prompt.system,
-          user: prompt.user,
+          context: prompt.context,
+          user: prompt.instructions,
           signal: state.abort.signal,
           onProgress(p) {
+            downloading = p < 1;
             progress.hidden = p >= 1;
             progress.value = p;
             $('engine').textContent = 'Downloading Chrome\u2019s built-in model: ' + Math.round(p * 100) + '%. This happens once.';
@@ -397,20 +443,28 @@
             out.textContent = t;
           },
         });
-        text = Ai.stripFence(text);
+        times = r.times;
+        text = Ai.stripFence(r.text);
       }
       if (!text.trim()) throw new Error('The model returned nothing. Try again, or copy a smaller piece of code.');
       state.aiText = text;
       out.textContent = text;
       $('unit-copy').disabled = false;
       $('unit-download').disabled = false;
-      const notes = ['Done in ' + Math.round((Date.now() - started) / 1000) + ' s.'];
+      answered.set(key, text);
+      const lines = text.trim().split('\n').length;
+      const notes = [
+        'Done in ' + secs(Date.now() - started) + ', ' + lines + ' lines' +
+          (times ? ' (first line after ' + secs(times.first || times.done) + ').' : '.'),
+      ];
+      if (!remote && $('code-depth').value !== 'quick' && Date.now() - started > 45000) notes.push('For a faster, shorter file, choose \u201cQuick\u201d.');
       if (prompt.clipped) notes.push('Only the first ' + (remote ? Ai.MAX_MATERIAL : Ai.MAX_LOCAL).toLocaleString('en-US') + ' characters of the code were used.');
       $('engine').textContent = notes.join(' ');
     } catch (e) {
       unitError(String((e && e.message) || e));
       await refreshEngine();
     } finally {
+      clearInterval(ticker);
       progress.hidden = true;
       setBusy(false);
       state.abort = null;
@@ -469,7 +523,7 @@
       const box = h('input', { type: 'checkbox', checked: true, id: 'kind-' + k.id });
       box.addEventListener('change', () => {
         state.kinds[k.id] = box.checked;
-        local.set('prefs', { target: state.target, kinds: state.kinds });
+        local.set('prefs', Object.assign({}, prefs, { target: state.target, kinds: state.kinds }));
         if (state.model) rebuild();
       });
       kinds.append(h('label', { class: 'kind', title: KIND_HELP[k.id] }, box, h('span', { class: 'slot on' }), h('span', { text: k.label }), h('span', { class: 'n', id: 'count-' + k.id, text: '0' })));
@@ -491,7 +545,7 @@
       const radio = h('input', { type: 'radio', name: 'target', value: t.id, checked: t.id === state.target });
       radio.addEventListener('change', () => {
         state.target = t.id;
-        local.set('prefs', { target: state.target, kinds: state.kinds });
+        local.set('prefs', Object.assign({}, prefs, { target: state.target, kinds: state.kinds }));
         if (state.model) emit();
       });
       targets.append(h('label', {}, radio, t.label));
@@ -532,6 +586,7 @@
     for (const b of document.querySelectorAll('.reset')) {
       b.addEventListener('click', () => {
         if (state.abort) state.abort.abort();
+        engine.drop();
         state.model = null;
         state.plan = null;
         state.code = null;
@@ -580,6 +635,15 @@
     langSelect.addEventListener('change', () => {
       $('code-framework').value = Detect.byId(langSelect.value).framework;
       updateFileLine();
+    });
+    $('code-text').addEventListener('input', () => {
+      updateFileLine();
+      primeSoon(800);
+    });
+    if (prefs.depth === 'quick') $('code-depth').value = 'quick';
+    $('code-depth').addEventListener('change', () => {
+      prefs.depth = $('code-depth').value;
+      local.set('prefs', Object.assign({}, prefs, { target: state.target, kinds: state.kinds }));
     });
     $('unit-go').addEventListener('click', writeTests);
     $('unit-stop').addEventListener('click', () => state.abort && state.abort.abort());

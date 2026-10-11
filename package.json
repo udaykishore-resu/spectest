@@ -1,6 +1,6 @@
 {
   "name": "spectest",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Chrome extension: turns an OpenAPI or Swagger document into runnable API contract tests in Go, Java, Python, JavaScript or curl.",
   "author": "Udaykishore Resu",

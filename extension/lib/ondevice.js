@@ -1,5 +1,11 @@
 /* SpecTest: Chrome's built-in model (Gemini Nano, through the Prompt API). It runs on this computer: no key, no
-   account, and the code never leaves the browser. Chrome decides whether this computer can run it. */
+   account, and the code never leaves the browser. Chrome decides whether this computer can run it.
+
+   Speed: the model writes a few dozen words a second, so the time a request takes is mostly the length of the
+   answer. What can be taken off the clock is everything before the first word:
+   - the model is loaded and the instructions read once per page (a base session), not once per request;
+   - the code is read into a copy of that session while the user is still looking at it (prime), so pressing
+     "Write tests" only sends the short final instruction. */
 (function (root) {
   'use strict';
 
@@ -37,47 +43,121 @@
     }
   }
 
-  /* Streams the answer. onText gets the whole text so far after every chunk; onProgress gets 0..1 while downloading. */
-  async function generate({ system, user, signal, onText, onProgress }) {
-    const LM = api();
-    if (!LM) throw new Error(explain('missing'));
-    const session = await LM.create(
-      Object.assign({}, OPTIONS, {
-        signal,
-        initialPrompts: [{ role: 'system', content: system }],
-        monitor(m) {
-          m.addEventListener('downloadprogress', (e) => {
-            if (onProgress) onProgress(typeof e.loaded === 'number' ? e.loaded : 0);
-          });
-        },
-      })
-    );
-    let text = '';
-    try {
-      const stream = session.promptStreaming(user, { signal });
-      for await (const chunk of stream) {
-        const c = String(chunk);
-        // Older Chrome versions sent the whole answer so far in every chunk, newer ones send only the new part.
-        text = c.startsWith(text) && text ? c : text + c;
-        if (onText) onText(text);
-      }
-    } catch (e) {
-      if (e && e.name === 'QuotaExceededError') {
-        throw new Error('The code is too long for Chrome\u2019s built-in model. Copy one function or class at a time.');
-      }
-      if (e && e.name === 'AbortError') throw new Error('Stopped.');
-      throw new Error('Chrome\u2019s built-in model stopped with an error: ' + ((e && e.message) || e));
-    } finally {
-      try {
-        session.destroy();
-      } catch (_) {
-        /* already gone */
-      }
+  function friendly(e) {
+    if (e && e.name === 'QuotaExceededError') {
+      return new Error('The code is too long for Chrome\u2019s built-in model. Copy one function or class at a time.');
     }
-    return text;
+    if (e && e.name === 'AbortError') return new Error('Stopped.');
+    return new Error('Chrome\u2019s built-in model stopped with an error: ' + ((e && e.message) || e));
   }
 
-  const out = { status, explain, generate, OPTIONS };
+  /* One per page. Holds the loaded model with the instructions already read, and at most one primed copy. */
+  function createEngine() {
+    let base = null; // { system, promise }
+    let primed = null; // { system, context, promise }
+
+    function baseFor(system, onProgress) {
+      if (base && base.system === system) return base.promise;
+      if (base) base.promise.then((s) => s.destroy(), () => {});
+      const LM = api();
+      if (!LM) return Promise.reject(new Error(explain('missing')));
+      const promise = LM.create(
+        Object.assign({}, OPTIONS, {
+          initialPrompts: [{ role: 'system', content: system }],
+          monitor(m) {
+            m.addEventListener('downloadprogress', (e) => {
+              if (onProgress) onProgress(typeof e.loaded === 'number' ? e.loaded : 0);
+            });
+          },
+        })
+      );
+      base = { system, promise };
+      promise.catch(() => {
+        if (base && base.promise === promise) base = null;
+      });
+      return promise;
+    }
+
+    async function freshCopy(system, context, onProgress) {
+      const b = await baseFor(system, onProgress);
+      const s = await b.clone();
+      if (context) await s.append(context);
+      return s;
+    }
+
+    /* Start reading the code now, before the user asks. Safe to call often: only the latest code is kept. */
+    function prime(system, context) {
+      if (primed && primed.system === system && primed.context === context) return primed.promise;
+      drop();
+      const promise = freshCopy(system, context);
+      primed = { system, context, promise };
+      promise.catch(() => {
+        if (primed && primed.promise === promise) primed = null;
+      });
+      return promise;
+    }
+
+    function drop() {
+      if (primed) primed.promise.then((s) => s.destroy(), () => {});
+      primed = null;
+    }
+
+    function take(system, context, onProgress) {
+      if (primed && primed.system === system && primed.context === context) {
+        const p = primed.promise;
+        primed = null; // a primed copy answers one request only
+        return p.catch(() => freshCopy(system, context, onProgress));
+      }
+      drop();
+      return freshCopy(system, context, onProgress);
+    }
+
+    /* Streams the answer. onText gets the whole text so far; onProgress gets 0..1 while the model downloads;
+       times gets { ready, first, done } in milliseconds from the start. */
+    async function generate({ system, context, user, signal, onText, onProgress }) {
+      const t0 = Date.now();
+      const times = { ready: 0, first: 0, done: 0 };
+      let session;
+      try {
+        session = await take(system, context || '', onProgress);
+      } catch (e) {
+        throw friendly(e);
+      }
+      times.ready = Date.now() - t0;
+      let text = '';
+      const stop = () => {
+        try {
+          session.destroy();
+        } catch (_) {
+          /* already gone */
+        }
+      };
+      if (signal) signal.addEventListener('abort', stop, { once: true });
+      try {
+        const stream = session.promptStreaming(user, { signal });
+        for await (const chunk of stream) {
+          if (signal && signal.aborted) break;
+          const c = String(chunk);
+          if (!times.first && c) times.first = Date.now() - t0;
+          // Older Chrome versions sent the whole answer so far in every chunk, newer ones send only the new part.
+          text = c.startsWith(text) && text ? c : text + c;
+          if (onText) onText(text);
+        }
+      } catch (e) {
+        throw signal && signal.aborted ? friendly({ name: 'AbortError' }) : friendly(e);
+      } finally {
+        if (signal) signal.removeEventListener('abort', stop);
+        stop();
+      }
+      if (signal && signal.aborted) throw friendly({ name: 'AbortError' });
+      times.done = Date.now() - t0;
+      return { text, times };
+    }
+
+    return { prime, drop, generate };
+  }
+
+  const out = { status, explain, createEngine, OPTIONS };
   root.SpecTestOnDevice = out;
   if (typeof module !== 'undefined' && module.exports) module.exports = out;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
