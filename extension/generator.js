@@ -1,10 +1,13 @@
-/* SpecTest generator page: load a contract, choose what to check, read and download the tests. */
+/* SpecTest generator page. Three ways in (copied code, an API contract, an uploaded file); code gets unit tests
+   written by Chrome's built-in model, a contract gets contract tests built from its rules. */
 (function () {
   'use strict';
   const Spec = globalThis.SpecTestSpec;
   const Plan = globalThis.SpecTestPlan;
   const Emit = globalThis.SpecTestEmit;
   const Ai = globalThis.SpecTestAi;
+  const Detect = globalThis.SpecTestDetect;
+  const OnDevice = globalThis.SpecTestOnDevice;
   const $ = (id) => document.getElementById(id);
 
   function h(tag, props, ...kids) {
@@ -30,7 +33,7 @@
   };
   const FALLBACK_BASE = 'http://localhost:8080';
 
-  const state = { model: null, name: '', kinds: {}, off: new Set(), target: 'go', baseUrl: '', filter: '', full: null, plan: null, out: null, aiText: '' };
+  const state = { model: null, name: '', kinds: {}, off: new Set(), target: 'go', baseUrl: '', filter: '', full: null, plan: null, out: null, aiText: '', code: null, abort: null };
   for (const k of Plan.KINDS) state.kinds[k.id] = true;
 
   const local = {
@@ -125,7 +128,7 @@
     try {
       const res = await fetch(url.href, { credentials: 'omit', cache: 'no-store' });
       if (!res.ok) return showError('The server answered HTTP ' + res.status + ' for that address.');
-      load(await res.text(), url.hostname + url.pathname);
+      takeText(await res.text(), url.hostname + url.pathname);
     } catch (_) {
       await offerAccess('allow', url, () => fetchSpec(raw), showError);
     } finally {
@@ -137,7 +140,7 @@
     if (!file) return;
     if (file.size > 30 * 1024 * 1024) return showError('That file is larger than 30 MB.');
     const reader = new FileReader();
-    reader.onload = () => load(String(reader.result || ''), file.name);
+    reader.onload = () => takeText(String(reader.result || ''), file.name);
     reader.onerror = () => showError('The file could not be read.');
     reader.readAsText(file);
   }
@@ -145,10 +148,7 @@
   /* ------------------------------------------------------------ rendering */
   function renderLoaded() {
     const m = state.model;
-    $('loader').hidden = true;
-    $('loaded').hidden = false;
-    $('intro').hidden = true;
-    $('result').hidden = false;
+    show('contract');
     $('contract-name').textContent = m.title + (m.version ? ' ' + m.version : '');
     const s = $('summary');
     s.textContent = '';
@@ -220,7 +220,6 @@
     const perKind = {};
     for (const c of plan.cases) perKind[c.kind] = (perKind[c.kind] || 0) + 1;
     for (const k of Plan.KINDS) $('count-' + k.id).textContent = String(perKind[k.id] || 0);
-    $('ai-plan-label').textContent = 'The loaded contract (' + plan.cases.length + ' test cases from ' + plan.operations + ' operations)';
     const empty = !plan.cases.length;
     $('copy').disabled = empty;
     $('download').disabled = empty;
@@ -268,10 +267,171 @@
     setTimeout(() => URL.revokeObjectURL(url), 2000);
   }
 
-  /* ------------------------------------------------------------ AI mode */
-  function aiError(text) {
-    $('ai-error').textContent = text;
-    $('ai-error').hidden = !text;
+
+  /* ------------------------------------------------------------ routing: what was given, and which view shows */
+  function show(view) {
+    const code = view === 'code';
+    const contract = view === 'contract';
+    $('loader').hidden = code || contract;
+    $('intro').hidden = code || contract;
+    $('code-setup').hidden = !code;
+    $('unit').hidden = !code;
+    $('loaded').hidden = !contract;
+    $('result').hidden = !contract;
+    if (!code && !contract) $('summary').textContent = 'Copy code or an API contract, paste it, or upload a file';
+  }
+
+  /* The single entry point for every input: clipboard, paste, upload, page capture and address. */
+  function takeText(text, name, opts) {
+    showError('');
+    hideAllow('allow');
+    const c = Detect.classify(text, name);
+    if (c.kind === 'empty') return showError('There is nothing to read. Copy some code or a contract first.'), false;
+    if (c.kind === 'contract') return load(text, name);
+    if (c.kind === 'code') return showCode(text, name, c, opts || {}), true;
+    showError('This does not look like source code or an OpenAPI contract. Copy a function, a class or a whole file, or a contract that starts with "openapi:" or "swagger:".');
+    return false;
+  }
+
+  /* ------------------------------------------------------------ unit tests from code */
+  function unitError(text) {
+    $('unit-error').textContent = text;
+    $('unit-error').hidden = !text;
+  }
+
+  function codeFileName() {
+    return Detect.testFileName($('code-lang').value, $('code-text').value);
+  }
+
+  function showCode(text, name, c, opts) {
+    show('code');
+    unitError('');
+    state.code = { name: name || '' };
+    const lang = c.language ? c.language.id : 'go';
+    $('code-lang').value = lang;
+    $('code-framework').value = Detect.byId(lang).framework;
+    $('code-text').value = text.replace(/\r\n/g, '\n');
+    $('code-detected').textContent = c.language
+      ? 'Recognised as ' + c.language.label + (c.language.confidence === 'low' ? ' (not sure: change it below if that is wrong)' : '') + ', ' + c.lines + (c.lines === 1 ? ' line' : ' lines') + (name ? ' from ' + name : '') + '.'
+      : 'The language could not be recognised. Choose it below.';
+    $('code-title').textContent = /\.[A-Za-z0-9]+$/.test(name || '') ? name : 'Code';
+    const s = $('summary');
+    s.textContent = '';
+    s.append(h('strong', { text: 'Unit tests' }), ' for ' + (c.language ? c.language.label + ' code' : 'code') + (name ? ' from ' + name : ''));
+    $('unit-out').textContent = '';
+    $('unit-copy').disabled = true;
+    $('unit-download').disabled = true;
+    state.aiText = '';
+    updateFileLine();
+    refreshEngine().then((status) => {
+      if (opts.auto && status === 'available') writeTests();
+    });
+  }
+
+  function updateFileLine() {
+    $('unit-file').textContent = 'Saved as ' + codeFileName();
+  }
+
+  let engineStatus = 'missing';
+  async function refreshEngine() {
+    engineStatus = await OnDevice.status();
+    const ok = engineStatus === 'available' || engineStatus === 'downloadable' || engineStatus === 'downloading';
+    const remote = $('use-remote').checked;
+    $('engine').textContent = remote ? 'Tests will be written by the AI provider you set below.' : OnDevice.explain(engineStatus);
+    $('engine').className = 'engine' + (ok || remote ? '' : ' bad');
+    $('fallback').hidden = ok && !remote;
+    if (!ok && !remote) $('fallback').open = true;
+    $('unit-go').disabled = !ok && !remote;
+    $('unit-go').textContent = remote || engineStatus === 'available' ? 'Write tests' : engineStatus === 'downloadable' ? 'Download the model and write tests' : 'Write tests';
+    return engineStatus;
+  }
+
+  function setBusy(busy) {
+    $('unit-go').hidden = busy;
+    $('unit-stop').hidden = !busy;
+    for (const id of ['code-lang', 'code-framework', 'code-notes', 'code-text']) $(id).disabled = busy;
+  }
+
+  async function writeTests() {
+    unitError('');
+    hideAllow('ai-allow');
+    const code = $('code-text').value;
+    if (!code.trim()) return unitError('There is no code to test.');
+    const lang = Detect.byId($('code-lang').value);
+    const remote = $('use-remote').checked;
+    const prompt = Ai.buildUnitPrompt({
+      code,
+      language: lang.label,
+      framework: $('code-framework').value,
+      fileName: codeFileName(),
+      notes: $('code-notes').value,
+      limit: remote ? Ai.MAX_MATERIAL : Ai.MAX_LOCAL,
+    });
+    const out = $('unit-out');
+    out.textContent = '';
+    $('unit-copy').disabled = true;
+    $('unit-download').disabled = true;
+    state.aiText = '';
+    state.abort = new AbortController();
+    setBusy(true);
+    const started = Date.now();
+    const progress = $('unit-progress');
+    $('engine').textContent = 'Writing tests\u2026';
+    try {
+      let text;
+      if (remote) {
+        text = await writeRemote(prompt, state.abort.signal);
+        if (text === null) return;
+      } else {
+        text = await OnDevice.generate({
+          system: prompt.system,
+          user: prompt.user,
+          signal: state.abort.signal,
+          onProgress(p) {
+            progress.hidden = p >= 1;
+            progress.value = p;
+            $('engine').textContent = 'Downloading Chrome\u2019s built-in model: ' + Math.round(p * 100) + '%. This happens once.';
+          },
+          onText(t) {
+            progress.hidden = true;
+            out.textContent = t;
+          },
+        });
+        text = Ai.stripFence(text);
+      }
+      if (!text.trim()) throw new Error('The model returned nothing. Try again, or copy a smaller piece of code.');
+      state.aiText = text;
+      out.textContent = text;
+      $('unit-copy').disabled = false;
+      $('unit-download').disabled = false;
+      const notes = ['Done in ' + Math.round((Date.now() - started) / 1000) + ' s.'];
+      if (prompt.clipped) notes.push('Only the first ' + (remote ? Ai.MAX_MATERIAL : Ai.MAX_LOCAL).toLocaleString('en-US') + ' characters of the code were used.');
+      $('engine').textContent = notes.join(' ');
+    } catch (e) {
+      unitError(String((e && e.message) || e));
+      await refreshEngine();
+    } finally {
+      progress.hidden = true;
+      setBusy(false);
+      state.abort = null;
+    }
+  }
+
+  async function writeRemote(prompt, signal) {
+    const cfg = aiConfig();
+    const req = Ai.buildRequest(cfg, prompt);
+    saveAi();
+    let res;
+    let raw;
+    try {
+      res = await fetch(req.url, Object.assign({ credentials: 'omit', cache: 'no-store', signal }, req.init));
+      raw = await res.text();
+    } catch (e) {
+      if (e && e.name === 'AbortError') throw new Error('Stopped.');
+      await offerAccess('ai-allow', new URL(req.url), writeTests, unitError);
+      return null;
+    }
+    return Ai.readResponse(cfg.provider, res.status, raw).text;
   }
 
   function aiConfig() {
@@ -281,7 +441,7 @@
   function saveAi() {
     const cfg = aiConfig();
     const keep = $('ai-keep').checked;
-    local.set('ai', { provider: cfg.provider, baseUrl: cfg.baseUrl, model: cfg.model, target: $('ai-target').value, keep, key: keep ? cfg.key : '' });
+    local.set('ai', { provider: cfg.provider, baseUrl: cfg.baseUrl, model: cfg.model, keep, key: keep ? cfg.key : '' });
   }
 
   function applyProvider(previous) {
@@ -292,69 +452,12 @@
     $('ai-model').placeholder = p.model || 'The model name your provider uses';
   }
 
-  async function generateAi() {
-    aiError('');
-    hideAllow('ai-allow');
-    $('ai-status').textContent = '';
-    const kind = $('ai-kind-code').checked ? 'code' : 'plan';
-    let material;
-    let title = '';
-    if (kind === 'plan') {
-      if (!state.plan || !state.plan.cases.length) return aiError('Load a contract and select at least one operation first, or choose "Code I paste below".');
-      material = Emit.emit('plan', state.plan).code;
-      title = state.plan.title;
-    } else {
-      material = $('ai-code').value;
-      if (!material.trim()) return aiError('Paste the code you want tests for.');
-    }
-    const cfg = aiConfig();
-    let prompt;
-    let req;
+  async function readClipboard() {
     try {
-      prompt = Ai.buildPrompt({ kind, target: $('ai-target').value, notes: $('ai-notes').value, material, title });
-      req = Ai.buildRequest(cfg, prompt);
-    } catch (e) {
-      return aiError(String((e && e.message) || e));
+      return await navigator.clipboard.readText();
+    } catch (_) {
+      return null;
     }
-    saveAi();
-    const button = $('ai-go');
-    button.disabled = true;
-    const started = Date.now();
-    const tick = setInterval(() => ($('ai-status').textContent = 'Waiting for the model, ' + Math.round((Date.now() - started) / 1000) + ' s'), 1000);
-    $('ai-status').textContent = 'Waiting for the model';
-    try {
-      let res;
-      let raw;
-      try {
-        res = await fetch(req.url, Object.assign({ credentials: 'omit', cache: 'no-store' }, req.init));
-        raw = await res.text();
-      } catch (_) {
-        $('ai-status').textContent = '';
-        return await offerAccess('ai-allow', new URL(req.url), generateAi, aiError);
-      }
-      const out = Ai.readResponse(cfg.provider, res.status, raw);
-      state.aiText = out.text;
-      $('ai-code-out').textContent = out.text;
-      $('ai-result').hidden = false;
-      const notes = [];
-      if (out.cut) notes.push('The answer was cut off at the length limit. Select fewer operations or paste less code.');
-      if (prompt.clipped) notes.push('Only the first ' + Ai.MAX_MATERIAL.toLocaleString('en-US') + ' characters were sent.');
-      $('ai-status').textContent = notes.length ? notes.join(' ') : 'Done in ' + Math.round((Date.now() - started) / 1000) + ' s.';
-    } catch (e) {
-      $('ai-status').textContent = '';
-      aiError(String((e && e.message) || e));
-    } finally {
-      clearInterval(tick);
-      button.disabled = false;
-    }
-  }
-
-  function showTab(name) {
-    const ai = name === 'ai';
-    $('tab-contract').setAttribute('aria-selected', String(!ai));
-    $('tab-ai').setAttribute('aria-selected', String(ai));
-    $('contract').hidden = ai;
-    $('ai').hidden = !ai;
   }
 
   /* ------------------------------------------------------------ start */
@@ -394,7 +497,13 @@
       targets.append(h('label', {}, radio, t.label));
     }
 
-    $('read-paste').addEventListener('click', () => load($('paste').value, 'pasted text'));
+    // The three ways in.
+    $('paste-clipboard').addEventListener('click', async () => {
+      const text = await readClipboard();
+      if (text === null) return showError('Chrome did not let SpecTest read the clipboard. Paste into the box below instead (Ctrl+V or \u2318V).');
+      takeText(text, 'what you copied', { auto: true });
+    });
+    $('read-paste').addEventListener('click', () => takeText($('paste').value, 'pasted text', { auto: true }));
     $('pick-file').addEventListener('click', () => $('file').click());
     $('file').addEventListener('change', () => {
       readFile($('file').files[0]);
@@ -418,18 +527,19 @@
     $('url').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') fetchSpec($('url').value);
     });
-    $('sample').addEventListener('click', () => load(globalThis.SpecTestSample, 'the sample contract'));
-    $('reset').addEventListener('click', () => {
-      state.model = null;
-      state.plan = null;
-      $('loaded').hidden = true;
-      $('loader').hidden = false;
-      $('result').hidden = true;
-      $('intro').hidden = false;
-      $('summary').textContent = 'No contract loaded yet';
-      $('ai-plan-label').textContent = 'The loaded contract';
-    });
+    $('sample').addEventListener('click', () => takeText(globalThis.SpecTestSample, 'the sample contract'));
+    $('sample-code').addEventListener('click', () => takeText(globalThis.SpecTestSampleCode, 'the sample code'));
+    for (const b of document.querySelectorAll('.reset')) {
+      b.addEventListener('click', () => {
+        if (state.abort) state.abort.abort();
+        state.model = null;
+        state.plan = null;
+        state.code = null;
+        show('start');
+      });
+    }
 
+    // Contract view.
     let timer = 0;
     $('base-url').addEventListener('input', () => {
       clearTimeout(timer);
@@ -464,16 +574,25 @@
     $('copy').addEventListener('click', () => state.out && copyText($('copy'), state.out.code));
     $('download').addEventListener('click', () => state.out && download(state.out.file, state.out.code));
 
-    $('tab-contract').addEventListener('click', () => showTab('contract'));
-    $('tab-ai').addEventListener('click', () => showTab('ai'));
+    // Code view.
+    const langSelect = $('code-lang');
+    for (const l of Detect.LANGS) langSelect.append(h('option', { value: l.id, text: l.label }));
+    langSelect.addEventListener('change', () => {
+      $('code-framework').value = Detect.byId(langSelect.value).framework;
+      updateFileLine();
+    });
+    $('unit-go').addEventListener('click', writeTests);
+    $('unit-stop').addEventListener('click', () => state.abort && state.abort.abort());
+    $('unit-copy').addEventListener('click', () => copyText($('unit-copy'), state.aiText));
+    $('unit-download').addEventListener('click', () => download(codeFileName(), state.aiText));
 
+    // Fallback provider settings, used only when the built-in model cannot run here.
     const provider = $('ai-provider');
     for (const id of Object.keys(Ai.PROVIDERS)) provider.append(h('option', { value: id, text: Ai.PROVIDERS[id].label }));
     const saved = (await local.get('ai')) || {};
     if (Ai.PROVIDERS[saved.provider]) provider.value = saved.provider;
     $('ai-base').value = typeof saved.baseUrl === 'string' ? saved.baseUrl : '';
     $('ai-model').value = typeof saved.model === 'string' ? saved.model : '';
-    $('ai-target').value = typeof saved.target === 'string' ? saved.target : '';
     $('ai-keep').checked = saved.keep === true;
     if (saved.keep === true && typeof saved.key === 'string') $('ai-key').value = saved.key;
     applyProvider('');
@@ -483,16 +602,11 @@
       lastProvider = provider.value;
       saveAi();
     });
-    for (const id of ['ai-base', 'ai-model', 'ai-target', 'ai-keep', 'ai-key']) $(id).addEventListener('change', saveAi);
-    const kindChanged = () => ($('ai-code').hidden = !$('ai-kind-code').checked);
-    $('ai-kind-plan').addEventListener('change', kindChanged);
-    $('ai-kind-code').addEventListener('change', kindChanged);
-    $('ai-go').addEventListener('click', generateAi);
-    $('ai-copy').addEventListener('click', () => copyText($('ai-copy'), state.aiText));
-    $('ai-download').addEventListener('click', () => download('generated-tests.txt', state.aiText));
+    for (const id of ['ai-base', 'ai-model', 'ai-keep', 'ai-key']) $(id).addEventListener('change', saveAi);
+    $('use-remote').addEventListener('change', refreshEngine);
 
-    // Text handed over by the toolbar button.
-    if (location.hash === '#capture' || location.hash === '#ai') {
+    // Text handed over by the toolbar button: what was copied, or the contract on the page.
+    if (location.hash === '#capture') {
       let cap = null;
       try {
         cap = (await chrome.storage.session.get('capture')).capture || null;
@@ -501,21 +615,18 @@
         cap = null;
       }
       history.replaceState(null, '', location.pathname);
-      if (cap && cap.mode === 'ai') {
-        showTab('ai');
-        $('ai-kind-code').checked = true;
-        kindChanged();
-        $('ai-code').value = String(cap.selection || '');
-      } else if (cap) {
-        let name = '';
-        try {
-          const u = new URL(cap.url);
-          name = u.hostname + u.pathname;
-        } catch (_) {
-          name = 'the page';
+      if (cap) {
+        let name = cap.name || '';
+        if (!name && cap.url) {
+          try {
+            const u = new URL(cap.url);
+            name = u.hostname + u.pathname;
+          } catch (_) {
+            name = 'the page';
+          }
         }
-        if (cap.text && load(cap.text, name)) return;
-        if (cap.specUrl) {
+        if (cap.text) takeText(cap.text, name, { auto: true });
+        else if (cap.specUrl) {
           $('url').value = cap.specUrl;
           await fetchSpec(cap.specUrl);
         }

@@ -3,7 +3,8 @@
    - The toolbar path: reading a contract from GitHub's file view, a raw file and a documentation page.
      A toolbar click cannot be automated, so that part uses a copy of the extension with site access already granted
      and calls the same capture function the popup calls.
-   - AI mode against a stand-in for the provider (no real key is used, so the real providers are NOT exercised here). */
+   - Unit tests from code with Chrome's built-in model replaced by a stand-in (the real model is NOT exercised here),
+     including the popup reading the clipboard, uploads, the model download and the provider fallback. */
 const { chromium } = require('playwright');
 const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
@@ -65,7 +66,7 @@ async function generatorPage() {
 
     await page.fill('#paste', '{"hello": "world"}');
     await page.click('#read-paste');
-    check('text that is not a contract gets a plain error', /no "openapi" or "swagger" version field/.test(await text(page, '#load-error')));
+    check('text that is neither code nor a contract gets a plain error', /does not look like source code or an OpenAPI contract/.test(await text(page, '#load-error')), await text(page, '#load-error'));
 
     await page.click('#sample');
     await page.waitForSelector('#loaded:not([hidden])');
@@ -128,12 +129,13 @@ async function generatorPage() {
     if (clip === null) console.log('note: clipboard not readable in this browser run; copy button not verified');
     else check('Copy puts the code on the clipboard', clip === (await text(page, '#code')));
 
-    await page.click('#reset');
+    await page.locator('#loaded .reset').click();
+    await page.locator('details.more summary').click();
     await page.fill('#url', 'https://specs.example.test/cors/openapi.yaml');
     await page.click('#load-url');
     await page.waitForSelector('#loaded:not([hidden])');
     check('loads a contract from an address that allows reading', /specs\.example\.test\/cors\/openapi\.yaml/.test(await text(page, '#summary')));
-    await page.click('#reset');
+    await page.locator('#loaded .reset').click();
     await page.fill('#url', 'https://specs.example.test/missing.yaml');
     await page.click('#load-url');
     await page.waitForSelector('#load-error:not([hidden])');
@@ -155,81 +157,182 @@ async function generatorPage() {
     check('loads a contract from a chosen file', /from shop\.yaml/.test(await text(page, '#summary')));
     await page.screenshot({ path: path.join(OUT, 'generator.png') });
 
+    await page.evaluate(() => navigator.clipboard.writeText('see you at 5'));
     const popup = await ctx.newPage();
     watch(popup, errors);
     await popup.goto('chrome-extension://' + id + '/popup.html');
-    check('popup shows its three actions', (await popup.locator('button').count()) === 3);
+    check('popup with nothing usable copied offers the page contract and the generator', (await popup.locator('button:visible').count()) === 2 && /Copy a function/.test(await text(popup, '#lead')), { what: await text(popup, '#copied-what'), clip: await popup.evaluate(() => navigator.clipboard.readText().catch((e) => String(e))) });
     check('no errors on any page', errors.length === 0, errors);
   } finally {
     await ctx.close();
   }
 }
 
-async function aiMode() {
-  console.log('\n=== AI mode (provider replaced by a stand-in) ===');
+/* Chrome's built-in model is not present in this test browser. A stand-in with the documented Prompt API shape
+   replaces it in the extension's pages. Its status is set per test through the extension's localStorage, and it
+   records each prompt so the test can check what would have been sent to the model. */
+function installModelStandIn() {
+  if (!location.protocol.startsWith('chrome-extension')) return;
+  const get = (k, d) => {
+    try {
+      return localStorage.getItem(k) || d;
+    } catch (_) {
+      return d;
+    }
+  };
+  globalThis.LanguageModel = {
+    async availability() {
+      return get('lm-status', 'available');
+    },
+    async create(opts) {
+      const status = get('lm-status', 'available');
+      if (status === 'unavailable') throw new Error('not supported');
+      if (opts.monitor && status !== 'available') {
+        const t = new EventTarget();
+        opts.monitor(t);
+        for (const loaded of [0, 0.4, 1]) {
+          const e = new Event('downloadprogress');
+          e.loaded = loaded;
+          t.dispatchEvent(e);
+        }
+        localStorage.setItem('lm-status', 'available');
+      }
+      const system = (opts.initialPrompts || [])[0];
+      return {
+        promptStreaming(user) {
+          const list = JSON.parse(get('lm-prompts', '[]'));
+          list.push({ system: system && system.content, user, inputs: opts.expectedInputs, outputs: opts.expectedOutputs });
+          localStorage.setItem('lm-prompts', JSON.stringify(list));
+          const file = (/The test file is named (\S+)\./.exec(user) || [])[1] || 'unknown';
+          return (async function* () {
+            yield '```\n// ' + file + ' written by the stand-in model\n';
+            await new Promise((r) => setTimeout(r, 30));
+            yield 'test("works", () => {});\n```';
+          })();
+        },
+        destroy() {},
+      };
+    },
+  };
+}
+
+async function unitTests() {
+  console.log("\n=== Unit tests from code (Chrome's built-in model replaced by a stand-in) ===");
   const { ctx, id } = await launch(EXT);
+  await ctx.addInitScript(installModelStandIn);
+  await ctx.grantPermissions(['clipboard-read', 'clipboard-write']).catch(() => {});
   const errors = [];
   const calls = [];
+  const base = 'chrome-extension://' + id + '/';
+  const prompts = (page) => page.evaluate(() => JSON.parse(localStorage.getItem('lm-prompts') || '[]'));
   try {
-    const cors = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' };
-    await ctx.route('https://api.anthropic.com/**', (r) => {
-      const req = r.request();
-      calls.push({ url: req.url(), method: req.method(), headers: req.headers(), body: req.postData() });
-      if (req.headers()['x-api-key'] !== 'sk-stand-in') return r.fulfill({ status: 401, headers: cors, contentType: 'application/json', body: JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: 'invalid x-api-key' } }) });
-      return r.fulfill({ headers: cors, contentType: 'application/json', body: JSON.stringify({ type: 'message', content: [{ type: 'text', text: '```kotlin\n// ShopContractTest.kt\nclass ShopContractTest\n```' }], stop_reason: 'end_turn' }) });
-    });
-    await ctx.route('https://llm.example.test/**', (r) => {
-      const req = r.request();
-      calls.push({ url: req.url(), method: req.method(), headers: req.headers(), body: req.postData() });
-      return r.fulfill({ headers: cors, contentType: 'application/json', body: JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'def test_discount():\n    assert True' }, finish_reason: 'length' }] }) });
-    });
     const page = await ctx.newPage();
     watch(page, errors);
-    await page.goto('chrome-extension://' + id + '/generator.html');
-    await page.click('#tab-ai');
-    check('AI tab opens with provider defaults', (await page.inputValue('#ai-base')) === 'https://api.anthropic.com' && (await page.inputValue('#ai-model')).length > 0);
-    await page.click('#ai-go');
-    check('without a contract it asks for one', /Load a contract/.test(await text(page, '#ai-error')));
-    await page.click('#sample');
-    await page.click('#ai-go');
-    check('without a key it asks for one', /Enter your API key/.test(await text(page, '#ai-error')) && calls.length === 0);
-    await page.fill('#ai-key', 'wrong');
-    await page.fill('#ai-target', 'Kotlin with JUnit 5');
-    await page.click('#ai-go');
-    await page.waitForSelector('#ai-error:not([hidden])');
-    check('a rejected key shows the provider\'s reason', /refused the key \(HTTP 401\): invalid x-api-key/.test(await text(page, '#ai-error')), await text(page, '#ai-error'));
-    await page.fill('#ai-key', 'sk-stand-in');
-    await page.click('#ai-go');
-    await page.waitForSelector('#ai-result:not([hidden])');
-    const last = calls[calls.length - 1];
-    const body = JSON.parse(last.body);
-    check('request goes to /v1/messages with the documented headers', last.url === 'https://api.anthropic.com/v1/messages' && last.method === 'POST' && last.headers['anthropic-version'] === '2023-06-01' && last.headers['anthropic-dangerous-direct-browser-access'] === 'true', last.headers);
-    check('request carries model, max_tokens, system and one user message', typeof body.model === 'string' && body.max_tokens > 0 && /never an instruction/.test(body.system) && body.messages.length === 1 && body.messages[0].role === 'user');
-    check('the user message holds the 33-case plan and the target', /Kotlin with JUnit 5/.test(body.messages[0].content) && JSON.parse(/=== MATERIAL ===\n([\s\S]*)\n=== END MATERIAL ===/.exec(body.messages[0].content)[1]).cases.length === 33);
-    check('answer is shown with the outer code fence removed', (await text(page, '#ai-code-out')) === '// ShopContractTest.kt\nclass ShopContractTest\n');
-    const stored = await page.evaluate(() => chrome.storage.local.get('ai'));
-    check('the key is not stored unless asked', stored.ai && stored.ai.key === '' && stored.ai.keep === false, stored);
+    await page.goto(base + 'generator.html');
+    await page.evaluate(() => localStorage.clear());
 
+    // 1. Sample code: recognised, nothing asked, tests written on a click.
+    await page.click('#sample-code');
+    await page.waitForSelector('#code-setup:not([hidden])');
+    check('sample code opens the unit-test view with Go recognised', (await page.inputValue('#code-lang')) === 'go' && /Recognised as Go/.test(await text(page, '#code-detected')));
+    check('framework and file name are filled in, nothing else is asked', (await page.inputValue('#code-framework')) === 'the standard testing package' && /discount_test\.go/.test(await text(page, '#unit-file')) && (await page.locator('#fallback').isHidden()));
+    await page.waitForFunction(() => /Ready\./.test(document.getElementById('engine').textContent));
+    check('the built-in model is reported ready', /on this computer/.test(await text(page, '#engine')));
+    await page.click('#unit-go');
+    await page.waitForFunction(() => !document.getElementById('unit-copy').disabled);
+    const out = await text(page, '#unit-out');
+    check('streamed answer shown, outer code fence removed', out === '// discount_test.go written by the stand-in model\ntest("works", () => {});\n', out);
+    let p = (await prompts(page)).pop();
+    check('the prompt names Go, the framework, the file and the package, with the code fenced as data', /Write unit tests in Go using the standard testing package/.test(p.user) && /package pricing, the same package/.test(p.user) && /-----BEGIN CODE-----\npackage pricing/.test(p.user) && /one complete test file/.test(p.system));
+    check('the model is asked for English text in and out', JSON.stringify(p.inputs) === '[{"type":"text","languages":["en"]}]' && JSON.stringify(p.outputs) === '[{"type":"text","languages":["en"]}]');
+    const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#unit-download')]);
+    check('download is named discount_test.go', dl.suggestedFilename() === 'discount_test.go');
+    await page.selectOption('#code-lang', 'python');
+    check('changing the language changes framework and file name', (await page.inputValue('#code-framework')) === 'pytest' && /test_discount\.py/.test(await text(page, '#unit-file')));
+
+    // 2. Copied code through the page button: read, recognised and written without another click.
+    await page.locator('#code-setup .reset').click();
+    const java = fs.readFileSync(path.join(ROOT, 'test/fixtures/code/Sample.java'), 'utf8');
+    await page.evaluate((t) => navigator.clipboard.writeText(t), java);
+    await page.click('#paste-clipboard');
+    await page.waitForFunction(() => document.getElementById('unit-out').textContent.includes('PriceCalculatorTest.java') && !document.getElementById('unit-copy').disabled);
+    check('"Use what I copied": Java recognised and tests written straight away', (await page.inputValue('#code-lang')) === 'java' && /PriceCalculatorTest\.java written/.test(await text(page, '#unit-out')));
+
+    // 3. Uploaded source file: language taken from the file name.
+    await page.locator('#code-setup .reset').click();
+    await page.setInputFiles('#file', path.join(ROOT, 'test/fixtures/code/sample.rs'));
+    await page.waitForSelector('#code-setup:not([hidden])');
+    check('uploaded .rs file: Rust, named discount_tests.rs', (await page.inputValue('#code-lang')) === 'rust' && /discount_tests\.rs/.test(await text(page, '#unit-file')) && /from sample\.rs/.test(await text(page, '#code-detected')));
+    await page.locator('#code-setup .reset').click();
+    await page.setInputFiles('#file', path.join(ROOT, 'test/fixtures/shop.yaml'));
+    await page.waitForSelector('#loaded:not([hidden])');
+    check('uploaded contract file goes to contract tests instead', /Shop API/.test(await text(page, '#summary')) && (await page.locator('#unit').isHidden()));
+
+    // 4. The popup reads what was copied when it opens.
+    const py = fs.readFileSync(path.join(ROOT, 'test/fixtures/code/sample.py'), 'utf8');
+    await page.evaluate((t) => navigator.clipboard.writeText(t), py);
+    const popup = await ctx.newPage();
+    watch(popup, errors);
+    await popup.goto(base + 'popup.html');
+    await popup.waitForSelector('#use-copied:not([hidden])', { timeout: 5000 }).catch(() => {});
+    check('popup shows what was copied: Python code with a preview', /^Python code, 9 lines$/.test(await text(popup, '#copied-what')) && /def discount/.test(await text(popup, '#copied-preview')) && (await text(popup, '#use-copied')) === 'Write unit tests', await text(popup, '#copied-what'));
+    const opened = ctx.waitForEvent('page');
+    await popup.click('#use-copied');
+    const gen = await opened;
+    watch(gen, errors);
+    await gen.waitForFunction(() => document.getElementById('unit-out').textContent.includes('stand-in'), null, { timeout: 8000 }).catch(() => {});
+    check('one click: a generator tab opens with Python tests already written', (await gen.inputValue('#code-lang')) === 'python' && /test_discount\.py written/.test(await text(gen, '#unit-out')));
+    check('the copied text is removed from session storage once read', (await gen.evaluate(async () => Object.keys(await chrome.storage.session.get('capture')).length)) === 0);
+    await page.bringToFront();
+    await page.evaluate((t) => navigator.clipboard.writeText(t), shopText);
+    const popup2 = await ctx.newPage();
+    await popup2.goto(base + 'popup.html');
+    await popup2.waitForSelector('#use-copied:not([hidden])', { timeout: 5000 }).catch(() => {});
+    check('popup recognises a copied contract and offers API tests', /API contract/.test(await text(popup2, '#copied-what')) && (await text(popup2, '#use-copied')) === 'Write API tests');
+    await page.bringToFront();
+    await page.evaluate(() => navigator.clipboard.writeText('see you at 5, thanks!'));
+    const popup3 = await ctx.newPage();
+    await popup3.goto(base + 'popup.html');
+    await popup3.waitForTimeout(400);
+    check('popup ignores copied prose', (await popup3.locator('#use-copied').isHidden()) && (await popup3.locator('#copied').isHidden()), { what: await text(popup3, '#copied-what'), clip: await popup3.evaluate(() => navigator.clipboard.readText().catch((e) => String(e))) });
+
+    // 5. Model not downloaded yet: the button says so, the download shows progress, then tests are written.
+    await page.bringToFront();
+    await page.evaluate(() => localStorage.setItem('lm-status', 'downloadable'));
+    await page.reload();
+    await page.click('#sample-code');
+    await page.waitForFunction(() => /Download the model/.test(document.getElementById('unit-go').textContent));
+    check('model not on this computer: button offers to download it', /not on this computer yet/.test(await text(page, '#engine')));
+    await page.click('#unit-go');
+    await page.waitForFunction(() => !document.getElementById('unit-copy').disabled);
+    check('after the download the tests are written', true);
+
+    // 6. This computer cannot run the model: say why, and only then offer a provider key.
+    await page.evaluate(() => localStorage.setItem('lm-status', 'unavailable'));
+    await page.reload();
+    await page.click('#sample-code');
+    await page.waitForSelector('#fallback:not([hidden])');
+    check('model unavailable: reason shown, write button disabled, key settings offered', /cannot run its built-in model/.test(await text(page, '#engine')) && (await page.locator('#unit-go').isDisabled()) && (await page.locator('#fallback').getAttribute('open')) !== null);
+    const cors = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' };
+    await ctx.route('https://llm.example.test/**', (r) => {
+      const req = r.request();
+      calls.push({ url: req.url(), headers: req.headers(), body: req.postData() });
+      return r.fulfill({ headers: cors, contentType: 'application/json', body: JSON.stringify({ choices: [{ message: { role: 'assistant', content: '```go\nfunc TestDiscount(t *testing.T) {}\n```' }, finish_reason: 'stop' }] }) });
+    });
     await page.selectOption('#ai-provider', 'openai');
-    check('switching provider swaps the default address', (await page.inputValue('#ai-base')) === 'https://api.openai.com/v1');
     await page.fill('#ai-base', 'https://llm.example.test/v1');
-    await page.fill('#ai-model', 'local-model');
-    await page.check('#ai-kind-code');
-    await page.fill('#ai-code', 'def discount(total, vip): return total * 0.9 if vip else total');
-    await page.check('#ai-keep');
-    await page.click('#ai-go');
-    await page.waitForFunction(() => document.getElementById('ai-code-out').textContent.includes('test_discount'));
-    const o = calls[calls.length - 1];
-    const ob = JSON.parse(o.body);
-    check('OpenAI-compatible request shape', o.url === 'https://llm.example.test/v1/chat/completions' && o.headers.authorization === 'Bearer sk-stand-in' && ob.model === 'local-model' && ob.messages.map((m) => m.role).join() === 'system,user' && /=== MATERIAL ===\ndef discount/.test(ob.messages[1].content));
-    check('a cut-off answer is flagged', /cut off at the length limit/.test(await text(page, '#ai-status')));
-    const kept = await page.evaluate(() => chrome.storage.local.get('ai'));
-    check('with "keep" ticked the key is stored', kept.ai.key === 'sk-stand-in' && kept.ai.keep === true);
-    await page.fill('#ai-base', 'http://plain.example.test/v1');
-    await page.click('#ai-go');
-    check('a plain-http provider address is refused', /must start with https/.test(await text(page, '#ai-error')));
-    await page.screenshot({ path: path.join(OUT, 'ai.png') });
-    check('no errors on the page', errors.length === 0, errors);
+    await page.fill('#ai-model', 'm');
+    await page.fill('#ai-key', 'sk-stand-in');
+    await page.check('#use-remote');
+    check('with a provider chosen the button works again', !(await page.locator('#unit-go').isDisabled()));
+    await page.click('#unit-go');
+    await page.waitForFunction(() => document.getElementById('unit-out').textContent.includes('TestDiscount'));
+    const last = calls[calls.length - 1];
+    check('fallback provider gets the same prompt, with the key', last && last.url === 'https://llm.example.test/v1/chat/completions' && last.headers.authorization === 'Bearer sk-stand-in' && /Write unit tests in Go/.test(JSON.parse(last.body).messages[1].content));
+    const stored = await page.evaluate(() => chrome.storage.local.get('ai'));
+    check('the key is not stored unless asked', stored.ai && stored.ai.key === '');
+    await page.screenshot({ path: path.join(OUT, 'unit-fallback.png') });
+    check('no errors on the pages', errors.length === 0, errors);
   } finally {
     await ctx.close();
   }
@@ -259,7 +362,7 @@ async function toolbarPath() {
       const res = await sw.evaluate(async ([u, m]) => {
         const tabs = await chrome.tabs.query({});
         const tab = tabs.filter((t) => t.url === u).pop();
-        return capture(tab.id, m);
+        return capture(tab.id);
       }, [url, mode]);
       const gen = res.ok ? await opened : null;
       if (gen) {
@@ -283,22 +386,8 @@ async function toolbarPath() {
     check('documentation page: follows the link to the contract', c.res.ok && /docs\.example\.test\/v1\/openapi\.json/.test(await text(c.gen, '#summary')), await text(c.gen, '#summary'));
 
     c = await capture('https://code.example.test/pricing', 'contract');
-    check('page with no contract: says so and opens nothing', !c.res.ok && /No OpenAPI or Swagger document found/.test(c.res.error) && c.gen === null, c.res);
+    check('page with no contract: says so and opens nothing', !c.res.ok && /No OpenAPI or Swagger contract was found/.test(c.res.error) && c.gen === null, c.res);
 
-    c = await capture('https://code.example.test/pricing', 'ai');
-    check('AI path with nothing selected: asks for a selection', !c.res.ok && /Select the code/.test(c.res.error), c.res);
-
-    c = await capture('https://code.example.test/pricing', 'ai', (page) =>
-      page.evaluate(() => {
-        const range = document.createRange();
-        range.selectNodeContents(document.getElementById('code'));
-        const sel = window.getSelection();
-        sel.removeAllRanges();
-        sel.addRange(range);
-      })
-    );
-    await c.gen.waitForFunction(() => document.getElementById('ai-code').value.length > 0, null, { timeout: 8000 }).catch(() => {});
-    check('AI path: selected code arrives in the AI tab', c.res.ok && (await c.gen.locator('#ai').isVisible()) && /^func Discount\(total float64/.test(await c.gen.inputValue('#ai-code')));
     check('no errors on the generator pages', errors.length === 0, errors);
   } finally {
     await ctx.close();
@@ -307,7 +396,7 @@ async function toolbarPath() {
 
 (async () => {
   await generatorPage();
-  await aiMode();
+  await unitTests();
   await toolbarPath();
   const failed = results.filter((r) => !r.ok);
   console.log('\n' + (results.length - failed.length) + '/' + results.length + ' checks passed');

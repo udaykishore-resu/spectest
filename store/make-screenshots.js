@@ -21,6 +21,18 @@ const EXT = path.resolve(__dirname, '..', 'extension');
   const id = new URL(sw.url()).host;
   const page = await ctx.newPage();
   await page.goto('chrome-extension://' + id + '/generator.html');
+
+  // Screenshot 1: copied code, ready for unit tests. Chromium here has no built-in model, so its "ready" status is
+  // reproduced with a stand-in; no model output is shown, because none was produced.
+  await page.addInitScript(() => {
+    globalThis.LanguageModel = { availability: async () => 'available', create: async () => ({ promptStreaming: async function* () {}, destroy() {} }) };
+  });
+  await page.reload();
+  await page.click('#sample-code');
+  await page.waitForFunction(() => /Ready\./.test(document.getElementById('engine').textContent));
+  await page.screenshot({ path: path.join(__dirname, 'spectest-screenshot-1.png') });
+
+  await page.locator('#code-setup .reset').click();
   await page.click('#sample');
   await page.waitForSelector('#loaded:not([hidden])');
   await page.evaluate(() => {
@@ -28,9 +40,6 @@ const EXT = path.resolve(__dirname, '..', 'extension');
     const at = code.textContent.indexOf('// POST /items: returns');
     code.scrollTop = Math.max(0, (code.textContent.slice(0, at).split('\n').length - 3) * parseFloat(getComputedStyle(code).lineHeight));
   });
-  await page.waitForTimeout(300);
-  await page.screenshot({ path: path.join(__dirname, 'spectest-screenshot-1.png') });
-
   await page.locator('#targets label').getByText('Python', { exact: true }).click();
   await page.fill('#filter', '/items');
   await page.evaluate(() => {
@@ -44,6 +53,7 @@ const EXT = path.resolve(__dirname, '..', 'extension');
   const tile = await ctx.newPage();
   await tile.setViewportSize({ width: 440, height: 280 });
   await tile.goto('file://' + path.join(__dirname, 'promo.html'));
+  await tile.waitForTimeout(300);
   await tile.screenshot({ path: path.join(__dirname, 'spectest-promo-440x280.png') });
   await ctx.close();
 

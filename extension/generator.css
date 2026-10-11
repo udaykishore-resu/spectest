@@ -503,3 +503,94 @@ details ul {
     transition: background-color 0.12s, border-color 0.12s;
   }
 }
+
+/* Three ways in, and the unit-test view. */
+.ways {
+  margin: 12px 0 18px;
+  padding: 0;
+  list-style: none;
+}
+.ways li {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+.intro h3 {
+  margin-top: 6px;
+}
+.more {
+  margin-top: 16px;
+}
+.more summary {
+  font-weight: 600;
+  color: var(--accent);
+}
+textarea.tall {
+  min-height: 320px;
+}
+.grid.one {
+  grid-template-columns: 1fr;
+}
+#unit {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+#unit[hidden] {
+  display: none;
+}
+#unit .code {
+  min-height: 300px;
+}
+.engine {
+  margin: 0;
+  padding-left: 10px;
+  border-left: 3px solid var(--post);
+  color: var(--muted);
+  font-size: 13px;
+  max-width: 640px;
+}
+.engine.bad {
+  border-left-color: var(--alert);
+  color: var(--alert);
+}
+progress {
+  width: 100%;
+  height: 6px;
+  margin-top: 10px;
+  accent-color: var(--accent);
+}
+.fallback {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+}
+.fallback .grid {
+  max-width: none;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+.intro .ways li {
+  display: block;
+}
+#loader .row {
+  flex-wrap: wrap;
+}
+textarea#code-text {
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow-x: auto;
+}
+#unit-out:empty::before {
+  content: 'Press \201CWrite tests\201D. The tests appear here as they are written.';
+  color: #8b93b8;
+  font-family: var(--ui);
+}
+textarea {
+  tab-size: 4;
+}

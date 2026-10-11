@@ -17,7 +17,7 @@ test('Chrome Web Store limits', () => {
 });
 
 test('permissions are exactly the ones the listing justifies', () => {
-  assert.deepEqual(manifest.permissions.slice().sort(), ['activeTab', 'scripting', 'storage']);
+  assert.deepEqual(manifest.permissions.slice().sort(), ['activeTab', 'clipboardRead', 'scripting', 'storage']);
   assert.equal(manifest.host_permissions, undefined, 'no site access is granted at install');
   assert.deepEqual(manifest.optional_host_permissions, ['https://*/*', 'http://localhost/*', 'http://127.0.0.1/*']);
   assert.equal(manifest.content_scripts, undefined);
@@ -35,7 +35,7 @@ test('every file the manifest and pages name exists', () => {
 });
 
 test('own code never builds HTML from strings or evaluates text', () => {
-  const own = ['background.js', 'popup.js', 'generator.js', 'lib/spec.js', 'lib/plan.js', 'lib/emit.js', 'lib/ai.js'];
+  const own = ['background.js', 'popup.js', 'generator.js', 'lib/spec.js', 'lib/plan.js', 'lib/emit.js', 'lib/ai.js', 'lib/detect.js', 'lib/ondevice.js'];
   for (const f of own) {
     const text = fs.readFileSync(path.join(EXT, f), 'utf8');
     assert.ok(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\(|new Function\(/.test(text), f);
@@ -43,6 +43,14 @@ test('own code never builds HTML from strings or evaluates text', () => {
   }
 });
 
-test('the bundled sample is the same text as the test fixture', () => {
-  assert.equal(require('../extension/lib/sample.js'), fs.readFileSync(path.join(__dirname, 'fixtures/shop.yaml'), 'utf8'));
+test('the bundled samples are the same text as the test fixtures', () => {
+  const sample = require('../extension/lib/sample.js');
+  assert.equal(sample.contract, fs.readFileSync(path.join(__dirname, 'fixtures/shop.yaml'), 'utf8'));
+  assert.equal(sample.code, fs.readFileSync(path.join(__dirname, 'fixtures/code/sample.go'), 'utf8'));
+});
+
+test('the clipboard is read only by the popup and the generator page, never by code injected into websites', () => {
+  for (const f of ['background.js', 'lib/detect.js', 'lib/ondevice.js', 'lib/ai.js']) {
+    assert.ok(!/clipboard/.test(fs.readFileSync(path.join(EXT, f), 'utf8')), f);
+  }
 });

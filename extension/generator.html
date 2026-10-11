@@ -9,33 +9,34 @@
   <body>
     <header class="top">
       <h1>SpecTest</h1>
-      <p id="summary" class="summary">No contract loaded yet</p>
-      <div class="modes" role="tablist" aria-label="What to generate">
-        <button type="button" role="tab" id="tab-contract" aria-controls="contract" aria-selected="true">Contract tests</button>
-        <button type="button" role="tab" id="tab-ai" aria-controls="ai" aria-selected="false">AI tests</button>
-      </div>
+      <p id="summary" class="summary">Copy code or an API contract, paste it, or upload a file</p>
     </header>
 
     <main>
-      <section class="pane source" aria-label="Contract">
+      <section class="pane source" aria-label="What to test">
+        <!-- One way in for all three inputs: copied code, an API contract, or a source file. -->
         <div id="loader">
-          <h2>Load a contract</h2>
-          <p class="help">An OpenAPI 3 or Swagger 2 document, as JSON or YAML. It stays in this tab.</p>
-          <label class="field" for="paste">Paste it here, or drop a file on the box</label>
-          <textarea id="paste" spellcheck="false" placeholder="openapi: 3.0.3&#10;info:&#10;  title: …"></textarea>
+          <h2>What should be tested?</h2>
+          <p class="help">Source code in any common language, or an OpenAPI / Swagger contract. SpecTest works out which it is.</p>
           <div class="row">
-            <button type="button" id="read-paste" class="primary">Read the pasted text</button>
-            <button type="button" id="pick-file">Choose a file</button>
-            <input type="file" id="file" accept=".json,.yaml,.yml,.txt,.md,application/json" hidden />
+            <button type="button" id="paste-clipboard" class="primary">Use what I copied</button>
+            <button type="button" id="pick-file">Upload a file</button>
+            <input type="file" id="file" hidden />
           </div>
-          <label class="field" for="url">Or load it from an address</label>
+          <label class="field" for="paste">Or paste it here, or drop a file on the box</label>
+          <textarea id="paste" spellcheck="false" placeholder="func Discount(price float64, percent int) (float64, error) { …"></textarea>
           <div class="row">
-            <input type="url" id="url" placeholder="https://example.com/openapi.json" spellcheck="false" />
-            <button type="button" id="load-url">Load</button>
+            <button type="button" id="read-paste">Use the pasted text</button>
+            <button type="button" id="sample-code" class="quiet">Try sample code</button>
+            <button type="button" id="sample" class="quiet">Try a sample contract</button>
           </div>
-          <div class="row">
-            <button type="button" id="sample" class="quiet">Try the sample contract</button>
-          </div>
+          <details class="more">
+            <summary>Load a contract from an address</summary>
+            <div class="row">
+              <input type="url" id="url" placeholder="https://example.com/openapi.json" spellcheck="false" aria-label="Contract address" />
+              <button type="button" id="load-url">Load</button>
+            </div>
+          </details>
           <p id="load-error" class="alert" role="alert" hidden></p>
           <div id="allow" class="allow" hidden>
             <p id="allow-text"></p>
@@ -43,10 +44,36 @@
           </div>
         </div>
 
+        <!-- Code: unit tests. -->
+        <div id="code-setup" hidden>
+          <div class="row spread">
+            <h2 id="code-title">Code</h2>
+            <button type="button" class="quiet reset">Start over</button>
+          </div>
+          <p id="code-detected" class="help"></p>
+          <div class="grid one">
+            <div>
+              <label class="field" for="code-lang">Language</label>
+              <select id="code-lang"></select>
+            </div>
+            <div>
+              <label class="field" for="code-framework">Test framework</label>
+              <input type="text" id="code-framework" spellcheck="false" />
+            </div>
+            <div>
+              <label class="field" for="code-notes">Anything else the tests should do</label>
+              <input type="text" id="code-notes" placeholder="Optional, for example: use table-driven tests" />
+            </div>
+          </div>
+          <label class="field" for="code-text">Code under test</label>
+          <textarea id="code-text" class="tall" spellcheck="false" wrap="off"></textarea>
+        </div>
+
+        <!-- API contract: contract tests. -->
         <div id="loaded" hidden>
           <div class="row spread">
             <h2 id="contract-name">Contract</h2>
-            <button type="button" id="reset" class="quiet">Load another contract</button>
+            <button type="button" class="quiet reset">Start over</button>
           </div>
 
           <label class="field" for="base-url">Address of the API under test</label>
@@ -74,13 +101,69 @@
         </div>
       </section>
 
-      <section class="pane out" id="contract" role="tabpanel" aria-labelledby="tab-contract">
+      <section class="pane out" aria-live="polite">
         <div id="intro" class="intro">
-          <h2>What you get</h2>
-          <p>One test per rule the contract states, each sending a real request to a running API.</p>
+          <h2>Three ways in</h2>
+          <ul class="ways">
+            <li><strong>Copied code.</strong> Copy a function or class anywhere, then click the SpecTest button. Unit tests are written by Chrome&rsquo;s built-in model on this computer: no key, no account, nothing sent anywhere.</li>
+            <li><strong>An API contract.</strong> An OpenAPI or Swagger document becomes contract tests for a running API, in Go, Java, Python, JavaScript or curl.</li>
+            <li><strong>A source file.</strong> Upload a code file or a contract file; its type is recognised from the name and the content.</li>
+          </ul>
+          <h3>What contract tests check</h3>
           <ul id="intro-kinds"></ul>
-          <p class="help">These are contract tests for HTTP APIs. They check the outside of a service, not the functions inside it. For tests of code, use the AI tests tab.</p>
         </div>
+
+        <!-- Unit tests from code. -->
+        <div id="unit" hidden>
+          <div class="row spread">
+            <p id="engine" class="engine"></p>
+            <div class="row tight">
+              <button type="button" id="unit-go" class="primary">Write tests</button>
+              <button type="button" id="unit-stop" hidden>Stop</button>
+            </div>
+          </div>
+          <progress id="unit-progress" max="1" hidden></progress>
+          <p id="unit-error" class="alert" role="alert" hidden></p>
+          <details id="fallback" class="fallback" hidden>
+            <summary>Use an AI provider key instead</summary>
+            <p class="help">Only needed when this computer cannot run Chrome&rsquo;s built-in model. The code then goes from this tab to the provider you choose.</p>
+            <div class="grid">
+              <div>
+                <label class="field" for="ai-provider">Provider</label>
+                <select id="ai-provider"></select>
+              </div>
+              <div>
+                <label class="field" for="ai-model">Model</label>
+                <input type="text" id="ai-model" spellcheck="false" />
+              </div>
+              <div class="wide">
+                <label class="field" for="ai-base">Base address</label>
+                <input type="url" id="ai-base" spellcheck="false" />
+              </div>
+              <div class="wide">
+                <label class="field" for="ai-key">API key</label>
+                <input type="password" id="ai-key" autocomplete="off" spellcheck="false" />
+                <label class="check"><input type="checkbox" id="ai-keep" /> Keep the key in this browser (stored unencrypted in the extension's own storage)</label>
+              </div>
+            </div>
+            <label class="check"><input type="checkbox" id="use-remote" /> Write tests with this provider</label>
+            <div id="ai-allow" class="allow" hidden>
+              <p id="ai-allow-text"></p>
+              <button type="button" id="ai-allow-button"></button>
+            </div>
+          </details>
+          <div class="row spread runline">
+            <p id="unit-file" class="help"></p>
+            <div class="row tight">
+              <button type="button" id="unit-copy" disabled>Copy</button>
+              <button type="button" id="unit-download" disabled>Download</button>
+            </div>
+          </div>
+          <pre id="unit-out" class="code" tabindex="0" aria-label="Generated unit tests"></pre>
+          <p class="help">Written by a model. SpecTest does not run it: read it, run it, and fix what is wrong before you keep it.</p>
+        </div>
+
+        <!-- Contract tests. -->
         <div id="result" hidden>
           <div class="targets" role="radiogroup" aria-label="Output language" id="targets"></div>
           <div class="row spread runline">
@@ -95,79 +178,15 @@
           <p id="stats" class="stats"></p>
         </div>
       </section>
-
-      <section class="pane out" id="ai" role="tabpanel" aria-labelledby="tab-ai" hidden>
-        <h2>Tests written by a model, with your own key</h2>
-        <p class="help">
-          Use this for languages and frameworks the contract tab has no template for, or for unit tests of code. What you send goes
-          straight from this tab to the provider you choose. SpecTest shows the answer and never runs it.
-        </p>
-        <div class="grid">
-          <div>
-            <label class="field" for="ai-provider">Provider</label>
-            <select id="ai-provider"></select>
-          </div>
-          <div>
-            <label class="field" for="ai-model">Model</label>
-            <input type="text" id="ai-model" spellcheck="false" />
-          </div>
-          <div class="wide">
-            <label class="field" for="ai-base">Base address</label>
-            <input type="url" id="ai-base" spellcheck="false" />
-          </div>
-          <div class="wide">
-            <label class="field" for="ai-key">API key</label>
-            <input type="password" id="ai-key" autocomplete="off" spellcheck="false" />
-            <label class="check"><input type="checkbox" id="ai-keep" /> Keep the key in this browser (stored unencrypted in the extension's own storage)</label>
-          </div>
-        </div>
-
-        <fieldset>
-          <legend>What to write tests for</legend>
-          <label class="check"><input type="radio" name="ai-kind" id="ai-kind-plan" value="plan" checked /> <span id="ai-plan-label">The loaded contract</span></label>
-          <label class="check"><input type="radio" name="ai-kind" id="ai-kind-code" value="code" /> Code I paste below</label>
-          <textarea id="ai-code" spellcheck="false" placeholder="Paste the function, class or module to test" hidden></textarea>
-        </fieldset>
-
-        <div class="grid">
-          <div>
-            <label class="field" for="ai-target">Language and test framework</label>
-            <input type="text" id="ai-target" placeholder="For example: Kotlin with JUnit 5" />
-          </div>
-          <div>
-            <label class="field" for="ai-notes">Anything else it should follow</label>
-            <input type="text" id="ai-notes" placeholder="Optional" />
-          </div>
-        </div>
-
-        <div class="row">
-          <button type="button" id="ai-go" class="primary">Generate tests</button>
-          <p id="ai-status" class="help" role="status"></p>
-        </div>
-        <p id="ai-error" class="alert" role="alert" hidden></p>
-        <div id="ai-allow" class="allow" hidden>
-          <p id="ai-allow-text"></p>
-          <button type="button" id="ai-allow-button"></button>
-        </div>
-
-        <div id="ai-result" hidden>
-          <div class="row spread runline">
-            <p class="help">Written by a model and not run by SpecTest. Read it before you run it.</p>
-            <div class="row tight">
-              <button type="button" id="ai-copy">Copy</button>
-              <button type="button" id="ai-download" class="primary">Download</button>
-            </div>
-          </div>
-          <pre id="ai-code-out" class="code" tabindex="0" aria-label="Tests written by the model"></pre>
-        </div>
-      </section>
     </main>
 
     <script src="lib/js-yaml.min.js"></script>
     <script src="lib/spec.js"></script>
     <script src="lib/plan.js"></script>
     <script src="lib/emit.js"></script>
+    <script src="lib/detect.js"></script>
     <script src="lib/ai.js"></script>
+    <script src="lib/ondevice.js"></script>
     <script src="lib/sample.js"></script>
     <script src="generator.js"></script>
   </body>

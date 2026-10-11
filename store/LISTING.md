@@ -21,20 +21,18 @@ Everything to paste into the developer dashboard. URLs assume the repo is `githu
 ### Description
 
 ```
-SpecTest turns the contract of an HTTP API into tests you can run.
+SpecTest writes tests for you from code you copy, from a source file, or from an API contract.
 
-Open an OpenAPI or Swagger document, or click the toolbar button on a page that shows one. SpecTest reads every operation and writes one test for each rule the contract states: the documented success response and its required fields, a missing required field, a wrong type, a value outside the allowed range, a request without credentials, and a record that does not exist.
+Copy a function or a class from anywhere: your editor, a code review, a web page. Click the SpecTest button. It shows what you copied and which language it is in, and one click writes unit tests for it in the test framework that language normally uses. You can change the language, the framework, or add an instruction before it writes.
 
-You choose which operations and which checks to include, pick the language your project uses, and download a single test file. The file has no dependencies beyond the usual test tooling of that language and reads the address of the API and the access token from environment variables. Tests that need a token are skipped, not failed, when none is set.
+The unit tests are written by the AI model built into Chrome, on your own computer. There is no key to enter, no account, and your code is not sent anywhere. Chrome downloads the model once the first time; after that it works offline. The tests are a model's first draft: read them and run them before you keep them.
 
-Where the contract documents the error status, the test expects exactly that status. Where it documents none, the expectation is marked as an assumption in the generated code, so you can see which tests rest on the contract and which on convention.
+Give SpecTest an OpenAPI or Swagger contract instead, and it builds contract tests for a running API without any AI: for every operation, the documented success response and its required fields, missing and wrongly typed fields, values outside the allowed range, requests without credentials, and records that do not exist. You pick the operations and the checks, choose the language, and download one test file.
 
-Everything above happens inside your browser. The contract is not uploaded anywhere.
-
-An optional second mode uses an AI provider with your own API key to write the same test plan in other languages, or to write unit tests for code you select or paste. It is off until you enter a key. What you send goes directly from your browser to the provider you chose, and the answer is shown as text and never run.
+You can also upload a source file or a contract file, or open a contract on a web page and click the button there.
 
 Limits
-The tests call a running service, so point them at a test environment: they create, change and delete records. Success tests use the example values from the contract and may need your own test data. Contracts split across several files, and file-upload or XML request bodies, are not supported.
+Chrome's built-in model needs Chrome 138 or newer on a computer with enough memory and disk; on other computers SpecTest says why and lets you use your own AI provider key instead. Contract tests call a real running service, so point them at a test environment.
 ```
 
 ## Privacy tab
@@ -42,21 +40,22 @@ The tests call a running service, so point them at a test environment: they crea
 **Single purpose**
 
 ```
-Generates API test code from an OpenAPI or Swagger document that the user opens, pastes or points the extension at.
+Writes software tests: unit tests for source code the user copies or uploads, and API tests from an OpenAPI or Swagger contract the user provides.
 ```
 
 **Permission justifications**
 
 | Permission | Justification |
 |---|---|
-| `activeTab` | When the user clicks "Use the contract on this page" or "Write tests for the selected code", reads the contract text or the selected text from the current tab. No access exists without that click. |
+| `activeTab` | When the user clicks "Use the API contract on this page", reads the contract text from the current tab. No access exists without that click. |
+| `clipboardRead` | When the user opens the SpecTest popup, it reads the clipboard once to show whether the user copied code or an API contract, so tests can be written in one click. The clipboard is not read at any other time and its content is not stored. |
 | `scripting` | Runs the packaged function that reads that text from the current tab after the click. Only code shipped in the extension is injected. |
-| `storage` | Passes the text read from the tab to the generator page (session storage, deleted once read) and remembers the last-used language, check choices and AI provider settings on this device. The API key is stored only if the user ticks a box asking for that. |
+| `storage` | Passes the copied or page text to the SpecTest tab (session storage, deleted once read) and remembers the last-used output language and check choices on this device. Fallback AI provider settings are stored only if the user enters them; the key only if the user ticks a box asking for that. |
 | Optional host permissions (`https://*/*`, `http://localhost/*`, `http://127.0.0.1/*`) | Never granted at install. Requested for a single site, with a Chrome prompt, only when the user loads a contract from an address, or enters an AI provider address, that does not allow cross-origin reading. The broad pattern exists because those addresses are typed by the user and cannot be known in advance. |
 
 **Remote code:** No, I am not using remote code.
 
-**Data usage:** tick **Website content** (the extension reads contract text or selected text from the page the user clicks it on, and in the optional AI mode sends the user's chosen text to the AI provider the user configured). Tick nothing else. Certify all three statements.
+**Data usage:** tick **Website content** (the extension reads contract text from the page the user clicks it on, and reads the clipboard when the popup opens). Tick nothing else. Unit tests are written by Chrome's on-device model, so no code is sent anywhere unless the user chooses the optional provider fallback. Certify all three statements.
 
 **Privacy policy URL:** `https://github.com/udaykishore-resu/spectest/blob/main/PRIVACY.md`
 
@@ -67,10 +66,13 @@ Free · Public · All regions.
 ## Test instructions tab (optional, helps review)
 
 ```
-No account needed. Click the SpecTest toolbar button, choose "Open the generator", then "Try the sample contract". Test code appears on the right; change the language with the buttons above it and press Download. The "AI tests" tab does nothing until an API key is entered and is not needed to review the extension.
+No account and no key needed.
+Unit tests: copy any function (for example a short JavaScript or Python function), click the SpecTest toolbar button, then "Write unit tests". Tests are written by Chrome's built-in model on the device (Chrome 138+; the first run downloads the model). On a computer that cannot run that model, use the contract flow below.
+Contract tests: click the toolbar button, choose "Open SpecTest to paste or upload a file", then "Try a sample contract". Test code appears on the right; change the language with the buttons above it and press Download.
 ```
 
 ## Before you upload
 
 - `npm run package` builds `dist/spectest-<version>.zip`; upload that file.
-- The optional `https://*/*` permission may add time to the review. If it is rejected, the fallback is to drop "load by address" and custom AI addresses and keep paste, file and page capture.
+- `clipboardRead` shows users an install warning ("Read data you copy and paste"). That is the price of the one-click flow; the justification above explains it.
+- The optional `https://*/*` permission may add time to the review. If it is rejected, the fallback is to drop "load by address" and the AI provider fallback and keep copy, paste, upload and page capture.

@@ -1,10 +1,42 @@
 # SpecTest
 
-A Chrome extension that turns an OpenAPI or Swagger document into API contract tests you can run. Open a contract (on GitHub, as a raw file, from a documentation page, pasted, or from disk), choose what to check, and download one test file in Go, Java, Python, JavaScript or as a curl script. Every test sends a real request to a running API and checks the status code and the response fields the contract promises. An optional AI mode, with your own API key, writes the same test plan in other languages or writes unit tests for code you paste.
+A Chrome extension that writes tests from three kinds of input: **code you copied**, **an API contract**, or **a source file you upload**. Copy a function or class anywhere, click the SpecTest button, and unit tests in that language appear, written by Chrome's built-in model on your own computer: no API key, no account, and the code is not sent anywhere. Give it an OpenAPI or Swagger document instead and it builds contract tests for a running API in Go, Java, Python, JavaScript or curl, checked against the contract's own rules.
 
-**Topics:** `chrome-extension` `manifest-v3` `openapi` `swagger` `api-testing` `contract-testing` `test-generation` `golang` `pytest` `junit5` `developer-tools`
+**Topics:** `chrome-extension` `manifest-v3` `unit-testing` `test-generation` `chrome-built-in-ai` `gemini-nano` `openapi` `swagger` `api-testing` `contract-testing` `developer-tools`
 
-## What it generates
+## The three ways in
+
+| You give it | What happens | What writes the tests |
+|---|---|---|
+| Copied code | Click the toolbar button (or press Alt+Shift+T). The popup shows what you copied, recognised by language. One click opens SpecTest with the tests being written. | Chrome's built-in model, on your computer |
+| An API contract | Copy it, upload it, open it on GitHub and click "Use the API contract on this page", or load it from an address | SpecTest's own rules, no model involved |
+| A source file | "Upload a file" or drop it on the box; the file name decides the language | As above, depending on what the file is |
+
+Languages recognised for unit tests, with the framework used by default (you can change both before writing):
+
+| Language | Framework | Test file |
+|---|---|---|
+| Go | standard `testing` | `discount_test.go` |
+| Java | JUnit 5 | `PriceCalculatorTest.java` |
+| Kotlin | JUnit 5 + kotlin.test | `DiscountTest.kt` |
+| Scala | ScalaTest | `PricingSpec.scala` |
+| Python | pytest | `test_discount.py` |
+| TypeScript / JavaScript | Jest | `total.test.ts` / `total.test.js` |
+| C# | xUnit | `PriceCalculatorTests.cs` |
+| Rust | `#[test]` | `discount_tests.rs` |
+| Ruby | RSpec | `price_calculator_spec.rb` |
+| PHP | PHPUnit | `PriceCalculatorTest.php` |
+| Swift | XCTest | `PriceCalculatorTests.swift` |
+| C++ | GoogleTest | `discount_test.cpp` |
+| C | Unity | `test_discount.c` |
+
+### About Chrome's built-in model
+
+Unit tests are written by Gemini Nano through Chrome's Prompt API, which extensions can use from Chrome 138. Chrome downloads the model once (a few GB) the first time; SpecTest shows the progress. Chrome only runs it on computers with Windows 10/11, macOS 13+, Linux or a Chromebook Plus, at least 22 GB of free disk, and either more than 4 GB of GPU memory or 16 GB of RAM. On a computer that cannot run it, SpecTest says why and only then offers to use an AI provider key instead.
+
+It is a small model. Expect a useful first draft that sometimes calls functions the wrong way or misses an edge case, not finished tests. Copy one function or class at a time: about 12,000 characters of code is the most it is given.
+
+## Contract tests: what they check
 
 For each operation in the contract, up to six kinds of test:
 
@@ -40,9 +72,11 @@ All of them read `API_BASE_URL` and `API_TOKEN` (or `API_TOKEN_<SCHEME>` per sec
 | `extension/lib/spec.js` | Reads OpenAPI 3.x / Swagger 2.0 (JSON or YAML) into one model; builds sample values from schemas |
 | `extension/lib/plan.js` | Turns the model into a language-neutral list of test cases |
 | `extension/lib/emit.js` | Writes the cases out as Go, Java, Python, JavaScript, curl or JSON |
-| `extension/lib/ai.js` | The optional AI mode: prompt, request and reply handling |
+| `extension/lib/detect.js` | Tells code from contracts from prose, recognises 14 languages, picks framework and test file name |
+| `extension/lib/ondevice.js` | Chrome's built-in model: availability, one-time download, streamed answer |
+| `extension/lib/ai.js` | The unit-test prompt, and the AI-provider fallback for computers that cannot run the built-in model |
 | `extension/lib/js-yaml.min.js` | js-yaml 4.1.0 (MIT, licence alongside), the only third-party code |
-| `test/` | Unit tests (`node --test`), the sample contract, a mock API, and `verify-languages.js` |
+| `test/` | Unit tests (`node --test`), code samples in 14 languages, the sample contract, a mock API, and `verify-languages.js` |
 | `e2e/` | Browser tests in real Chromium with the extension loaded |
 | `store/` | Chrome Web Store listing text, screenshots, promo tile and icon, with the scripts that make them |
 | `scripts/package.sh` | Builds `dist/spectest-<version>.zip` |
@@ -50,31 +84,35 @@ All of them read `API_BASE_URL` and `API_TOKEN` (or `API_TOKEN_<SCHEME>` per sec
 ## Try it
 
 1. `chrome://extensions` → switch on **Developer mode** → **Load unpacked** → choose the `extension/` folder.
-2. Click the SpecTest toolbar button → **Open the generator** → **Try the sample contract**.
-3. Pick a language and press **Download**.
-4. To see the tests pass, start the bundled mock API and run the file against it:
+2. **Unit tests:** copy any function (the sample in `test/fixtures/code/` works), click the SpecTest toolbar button → **Write unit tests**.
+3. **Contract tests:** click the button → **Open SpecTest to paste or upload a file** → **Try a sample contract** → pick a language → **Download**.
+4. To see the contract tests pass, start the bundled mock API and run the file against it:
 
 ```bash
 PORT=8080 node test/fixtures/mock-server.js &
 API_BASE_URL=http://127.0.0.1:8080 API_TOKEN=test-token node --test api-contract.test.mjs
 ```
 
-On a page that shows a contract (a file on GitHub, a raw JSON or YAML URL, or API documentation that links to its contract), **Use the contract on this page** loads it directly.
+On a page that shows a contract (a file on GitHub, a raw JSON or YAML URL, or API documentation that links to its contract), **Use the API contract on this page** loads it directly.
 
 ## How it works
 
-The popup asks the service worker to read the current tab. That uses `activeTab`, so the extension can only read a page at the moment you click its button, and has no standing access to any site. The text is handed to the generator page through session storage and removed as soon as it is read. Everything in contract mode happens inside that page: parsing, planning and writing the code. Nothing is sent anywhere.
+Opening the popup reads the clipboard once (the `clipboardRead` permission), recognises what is there, and shows it. Nothing is read in the background and nothing is kept: on "Write tests" the text is handed to the SpecTest tab through session storage and removed as soon as that tab reads it.
+
+Unit tests are written in the SpecTest tab by Chrome's built-in model through the Prompt API (`LanguageModel`). The code stays on the computer. The answer streams in as text and is never run.
+
+For a contract on a web page, the popup asks the service worker to read the current tab. That uses `activeTab`, so the extension can only read a page at the moment you click its button, and has no standing access to any site. The text is handed to the generator page through session storage and removed as soon as it is read. Everything in contract mode happens inside that page: parsing, planning and writing the code. Nothing is sent anywhere.
 
 Loading a contract by address uses an ordinary request. If the site does not allow other pages to read it, SpecTest shows an **Allow access** button that asks Chrome for permission to that one site.
 
-AI mode sends the test plan (or the code you pasted) from the generator page straight to the provider you configured, with the key you typed. The key stays in memory unless you tick the box to keep it. The answer is shown as text and is never executed.
+Only when Chrome says this computer cannot run its model does SpecTest show the provider fallback. If you then choose it, the code goes from the SpecTest tab straight to that provider with the key you typed. The key stays in memory unless you tick the box to keep it.
 
 ## Develop
 
 ```bash
-npm test                 # 24 unit tests
+npm test                 # 35 unit tests
 npm run verify           # generated tests really run, in every language (needs go, python3 + pytest + requests, javac, curl)
-NODE_PATH=$(npm root -g) npm run e2e   # 51 browser checks; needs Playwright with Chromium
+NODE_PATH=$(npm root -g) npm run e2e   # 57 browser checks; needs Playwright with Chromium
 npm run screenshots      # regenerate the store pictures
 npm run package          # dist/spectest-<version>.zip
 ```
@@ -83,23 +121,26 @@ npm run package          # dist/spectest-<version>.zip
 
 ## Limits
 
-- **HTTP APIs with an OpenAPI 3.x or Swagger 2.0 document only.** Not GraphQL, gRPC, SOAP or AsyncAPI.
-- **"Any language" is true only through AI mode.** The checked templates are the five above plus the JSON plan. AI output is written by a model and is not run or checked by SpecTest.
-- **These are contract tests, not unit tests.** They check a running service from outside. Unit tests of your own functions are only available through AI mode.
+- **Unit tests are a model's first draft.** Chrome's built-in model is small. Its tests are not run or checked by SpecTest and need reading and fixing before you keep them.
+- **The built-in model needs a capable computer** (see above) and Chrome 138+. Elsewhere there is no key-free way to write unit tests; the provider fallback needs your own key.
+- **Unit tests see only the code you give them.** Code that calls other files' functions gets tests that assume what those functions do.
+- **Contract tests: HTTP APIs with an OpenAPI 3.x or Swagger 2.0 document only.** Not GraphQL, gRPC, SOAP or AsyncAPI. They check a running service from outside.
 - **The tests change data.** POST, PUT and DELETE tests really create, replace and delete. Point them at a test environment.
 - **Success-path tests need matching test data.** Path values come from the contract's examples (or `1` / `string`); if record `1` does not exist, that test fails until you edit the value.
 - **No chaining.** A test does not create a record and then fetch it.
 - **Not handled:** `$ref` to other files, multipart and XML bodies (the test sends no body and a note says so), `pattern` when building sample strings, more than one credential on the same request. For `oneOf`/`anyOf` request bodies the first branch is used; responses with several allowed shapes get a status check only.
 - **OAuth:** the tests send whatever token you put in `API_TOKEN`; they do not obtain one.
-- **What has not been tested:** AI mode has only been run against a stand-in server, never against a real provider. The Java output is compiled and run in this repo's check with a stand-in for the three JUnit classes it uses, not with the JUnit jar. The toolbar click itself cannot be automated; the browser tests call the same function the click calls.
+- **What has not been tested:** the built-in model itself. Chrome's model is not available in the browser these tests run in, so the browser tests replace it with a stand-in that has the documented Prompt API shape; the quality of real Gemini Nano tests is unknown until you try it. The provider fallback has only been run against a stand-in server. The Java output is compiled and run in this repo's check with a stand-in for the three JUnit classes it uses, not with the JUnit jar. The toolbar click itself cannot be automated; the browser tests call the same function the click calls.
 
 ## Privacy
 
-See [PRIVACY.md](PRIVACY.md). Contract mode sends nothing. AI mode sends only what you choose, only to the provider you choose.
+See [PRIVACY.md](PRIVACY.md). Unit tests with the built-in model and contract tests send nothing anywhere. The provider fallback, if you choose it, sends the code only to the provider you set.
 
 ## Skills demonstrated
 
 - **API contract modelling:** one internal model for OpenAPI 3.0, 3.1 and Swagger 2.0, with `$ref`, `allOf`, `oneOf`, recursive schemas and security schemes
+- **On-device AI in a browser extension:** Chrome's Prompt API with availability checks, a one-time model download with progress, streaming, cancellation and a context-size guard
+- **Language detection without a parser:** weighted signals that tell 14 languages apart, tested on a sample of each
 - **Test design:** deriving positive and negative cases from a schema, and separating documented expectations from assumed ones
 - **Multi-language code generation:** Go, Java, Python, JavaScript and shell emitters from one neutral plan, with string quoting verified byte for byte in each
 - **Verification discipline:** generated code is executed against a correct and a deliberately broken service, and compiled for about 80 public contracts (Stripe, Box, Slack, Discord, Twilio)
