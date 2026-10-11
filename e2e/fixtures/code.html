@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8" /><title>pricing.go</title></head>
+  <body>
+    <p>Nothing that looks like an API contract here.</p>
+    <pre id="code">func Discount(total float64, vip bool) float64 {
+	if total &lt; 0 {
+		return 0
+	}
+	if vip {
+		return total * 0.9
+	}
+	return total
+}</pre>
+  </body>
+</html>

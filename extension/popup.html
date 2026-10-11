@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SpecTest</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <h1>SpecTest</h1>
+    <p class="lead">Turn an OpenAPI or Swagger document into API tests you can run.</p>
+    <button id="use-page" class="primary" type="button">Use the contract on this page</button>
+    <button id="open" type="button">Open the generator</button>
+    <button id="use-selection" type="button">Write tests for the selected code</button>
+    <p class="hint">The last one needs your own API key for an AI provider. The first two never leave your browser.</p>
+    <p id="status" role="alert" hidden></p>
+    <script src="popup.js"></script>
+  </body>
+</html>

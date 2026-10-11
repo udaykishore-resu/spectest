@@ -1,0 +1,203 @@
+openapi: 3.0.3
+info:
+  title: Shop API
+  version: 1.2.0
+servers:
+  - url: http://localhost:8080
+security:
+  - bearerAuth: []
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      security: []
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string }
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100 }
+      responses:
+        '200':
+          description: items
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Item' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+    post:
+      operationId: createItem
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NewItem' }
+      responses:
+        '201':
+          description: created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Item' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+  /items/{itemId}:
+    parameters:
+      - name: itemId
+        in: path
+        required: true
+        schema: { type: integer, example: 1 }
+    get:
+      operationId: getItem
+      responses:
+        '200':
+          description: one item
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Item' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+    put:
+      operationId: replaceItem
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NewItem' }
+      responses:
+        '200':
+          description: replaced
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Item' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      operationId: deleteItem
+      responses:
+        '204': { description: gone }
+        '404': { $ref: '#/components/responses/Problem' }
+  /search:
+    get:
+      operationId: searchItems
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string, example: widget }
+      responses:
+        '200':
+          description: results
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results, total]
+                properties:
+                  results:
+                    type: array
+                    items: { $ref: '#/components/schemas/Item' }
+                  total: { type: integer }
+        '400': { $ref: '#/components/responses/Problem' }
+  /reports:
+    get:
+      operationId: getReport
+      security:
+        - reportKey: []
+      responses:
+        '200':
+          description: report
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [generatedAt, rows]
+                properties:
+                  generatedAt: { type: string, format: date-time }
+                  rows: { type: array, items: { type: object } }
+        '401': { $ref: '#/components/responses/Problem' }
+  /tenants/me:
+    get:
+      operationId: getTenant
+      parameters:
+        - name: X-Tenant
+          in: header
+          required: true
+          schema: { type: string, example: acme }
+      responses:
+        '200':
+          description: tenant
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tenant]
+                properties:
+                  tenant: { type: string }
+  /login:
+    post:
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string, example: 'sam o''neil' }
+                password: { type: string, format: password }
+      responses:
+        '200':
+          description: token
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token]
+                properties:
+                  token: { type: string }
+        '400': { $ref: '#/components/responses/Problem' }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }
+    reportKey: { type: apiKey, in: query, name: api_key }
+  responses:
+    Problem:
+      description: problem
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error: { type: string }
+  schemas:
+    NewItem:
+      type: object
+      required: [name, price]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 50, example: Blue widget }
+        price: { type: number, minimum: 0, example: 9.5 }
+        category: { type: string, enum: [tools, toys] }
+        tags: { type: array, items: { type: string } }
+    Item:
+      allOf:
+        - $ref: '#/components/schemas/NewItem'
+        - type: object
+          required: [id]
+          properties:
+            id: { type: integer, readOnly: true }
